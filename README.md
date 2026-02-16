@@ -1,6 +1,7 @@
 # Basic Agent with Calculator Tool
 
 A minimal agentic AI implementation using Groq's API. This demonstrates the fundamental agent loop pattern.
+Note: Use Python 3.12 or lower; newer versions like 3.14 are not supported by Groq's API.
 
 ## Setup
 
