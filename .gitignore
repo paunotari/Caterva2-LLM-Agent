@@ -1,7 +1,7 @@
 # ========================
 # Environment variables
 # ========================
-.env
+../../.env
 .env.*
 !.env.example
 
@@ -9,7 +9,7 @@
 # Virtual environments
 # ========================
 venv/
-.venv/
+prototypes/toy_agent/.venv/
 
 # ========================
 # Python

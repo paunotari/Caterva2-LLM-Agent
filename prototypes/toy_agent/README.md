@@ -329,8 +329,10 @@ print(json.dumps(self.messages, indent=2))
 3. **Check API responses**: Add logging in the agent loop
 
 4. **Test tools independently**:
+
 ```python
-from tools import calculator
+from prototypes.tools import calculator
+
 result = calculator("add", 5, 3)
 print(result)  # Should print: {"result": 8}
 ```
