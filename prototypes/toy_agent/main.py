@@ -19,34 +19,40 @@ def main():
     print("  'quit' or 'exit' - Exit the program")
     print("  'reset' - Clear conversation history")
     print("=" * 60)
-    
+
     # Initialize the agent
     agent = Agent()
-    
+
+
     # Main interaction loop
     while True:
         try:
             # Get user input
             user_input = input("\nYou: ").strip()
-            
+
             # Handle commands
             if user_input.lower() in ['quit', 'exit']:
                 print("\nGoodbye!")
                 break
-            
+
             if user_input.lower() == 'reset':
                 agent.reset()
                 print("\n[Conversation reset]")
                 continue
-            
+
             if not user_input:
                 continue
-            
+
+            # Guard against excessively long input
+            if len(user_input) > 5000:
+                print("[Input too long]")
+                continue
+
             # Run the agent with user input
             print("\nAgent: ", end="", flush=True)
             response = agent.run(user_input)
             print(response)
-            
+
         except KeyboardInterrupt:
             print("\n\nGoodbye!")
             break

@@ -101,8 +101,8 @@ class Agent:
                 
                 print(f"  - Calling tool: {tool_name}")
                 print(f"    Arguments: {tool_args}")
-                
-                # Execute the tool
+
+                # Execute the tool - add error handling in case something goes wrong with the tool execution
                 tool_result = execute_tool(tool_name, tool_args)
                 print(f"    Result: {tool_result}")
                 

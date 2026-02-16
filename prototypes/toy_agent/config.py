@@ -12,7 +12,11 @@ load_dotenv()  # Must be called BEFORE os.getenv()
 
 # Initialize Groq client
 # Set your API key as an environment variable: export GROQ_API_KEY='your-key-here'
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+api_key = os.getenv("GROQ_API_KEY")
+if not api_key:
+    raise ValueError("GROQ_API_KEY environment variable is not set. Please set it in your .env file.")
+
+client = Groq(api_key=api_key)
 
 # Model configuration
 # Groq supports several models;
