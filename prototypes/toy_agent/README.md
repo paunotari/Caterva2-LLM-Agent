@@ -2,21 +2,31 @@
 
 A minimal agentic AI implementation using Groq's API. This demonstrates the fundamental agent loop pattern.
 
+_Note: Use Python 3.12 or lower (.venv); newer versions like 3.14 are not supported by Groq's API._
+
 ## Setup
 
-1. **Install dependencies:**
+1. **Create and activate the virtual environment:**
 ```bash
-pip install -r requirements.txt
+python3 -m venv .venv
+source .venv/bin/activate   # macOS/Linux
+# .venv\Scripts\Activate.ps1 # Windows PowerShell
 ```
 
-2. **Set up your Groq API key:**
+2. **Install dependencies:**
 ```bash
-export GROQ_API_KEY='your-api-key-here'
+python3 -m pip install --upgrade pip
+python3 -m pip install -r requirements.txt
+```
+
+3. **Store your Groq API key in a .env file in the project root:**
+```bash
+GROQ_API_KEY=your-api-key-here
 ```
 
 Get a free API key at: https://console.groq.com/
 
-3. **Run the agent:**
+4. **Run the agent:**
 ```bash
 python main.py
 ```
