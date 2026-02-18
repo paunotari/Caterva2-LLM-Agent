@@ -31,7 +31,7 @@ class Agent:
 
         # Track token usage to prevent runaway costs
         self.total_tokens_used = 0
-        self.max_total_tokens = 50000  # Safety limit per conversation
+        self.max_total_tokens = 500  # Safety limit per conversation
     
     def run(self, user_input: str) -> str:
         """
@@ -75,7 +75,17 @@ class Agent:
                 temperature=0.4, # Creativity grade: 0.0-deterministic, 1+ (up to 2)-randomness
                 max_tokens=1024
             )
-            
+
+            # ADDED: Track token usage
+            if hasattr(response, 'usage'):
+                tokens_this_call = response.usage.total_tokens
+                self.total_tokens_used += tokens_this_call
+
+                # Debug output
+                if iteration > 1:
+                    print(f"[Iteration {iteration}: {tokens_this_call} tokens used, "
+                          f"{self.total_tokens_used} total]")
+
             # Get the assistant's response
                 # .choices - response can contain multiple responses (usually we only ask for 1 - e.g. API call n=3)
                 # .message - inside every choice object there's various objects, metadata, etc. (ask Claude for the structure of a response object, we only want the message object)
@@ -136,3 +146,5 @@ class Agent:
         self.messages = [
             {"role": "system", "content": SYSTEM_PROMPT}
         ]
+        self.total_tokens_used = 0  # ADDED: Reset token counter
+        print(f"[Conversation and token counter reset]")
