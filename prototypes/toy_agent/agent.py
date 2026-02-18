@@ -28,6 +28,10 @@ class Agent:
             {"role": "system", "content": SYSTEM_PROMPT}
         ]
         self.max_iterations = 10  # Prevent infinite loops
+
+        # Track token usage to prevent runaway costs
+        self.total_tokens_used = 0
+        self.max_total_tokens = 50000  # Safety limit per conversation
     
     def run(self, user_input: str) -> str:
         """
@@ -44,6 +48,13 @@ class Agent:
         Returns:
             The agent's final response as a string
         """
+
+        # Check if we've hit our token budget for this conversation
+        if self.total_tokens_used > self.max_total_tokens:
+            return (f"[Token limit reached: {self.total_tokens_used} tokens used. "
+                    f"Please type 'reset' to start a new conversation.]")
+
+
         # Add the user's message to conversation history
         self.messages.append({
             "role": "user",
