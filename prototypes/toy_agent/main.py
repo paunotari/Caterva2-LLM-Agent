@@ -29,6 +29,7 @@ def main():
         try:
             # Get user input
             user_input = input("\nYou: ").strip()
+            print(f"[DEBUG received: {repr(user_input)}]")  # Temporary: shows exact input value
 
             # Handle commands
             if user_input.lower() in ['quit', 'exit']:
@@ -62,8 +63,10 @@ def main():
             print("\n\nGoodbye!")
             break
         except Exception as e:
-            print(f"\n[Error: {e}]")
+            print(f"\n[Error: {type(e).__name__}: {e}]")
             print("Try again or type 'quit' to exit.")
+            # Reset agent to avoid corrupted conversation state after an error
+            agent.reset()
 
 
 if __name__ == "__main__":

@@ -31,7 +31,7 @@ class Agent:
 
         # Track token usage to prevent runaway costs
         self.total_tokens_used = 0
-        self.max_total_tokens = 500  # Safety limit per conversation
+        self.max_total_tokens = 50000  # Safety limit per conversation
     
     def run(self, user_input: str) -> str:
         """
@@ -65,7 +65,7 @@ class Agent:
         iteration = 0
         while iteration < self.max_iterations:
             iteration += 1
-            
+
             # Call the LLM with current conversation and available tools
             response = client.chat.completions.create(
                 model=MODEL_NAME,
@@ -91,7 +91,9 @@ class Agent:
                 # .message - inside every choice object there's various objects, metadata, etc. (ask Claude for the structure of a response object, we only want the message object)
             assistant_message = response.choices[0].message
 
-            # Check if the LLM wants to use any tools
+            # Debug: print what tool_calls actually is
+            print(f"tool_calls: {assistant_message.tool_calls!r}")
+            # Check if the LLM wants to use any tools (None or empty list means no tools)
             if not assistant_message.tool_calls:
                 # No tool calls - this is the final answer
                 # Add to history before returning
@@ -101,11 +103,15 @@ class Agent:
                 })
                 return assistant_message.content or "I don't have a response."
 
-            # There are tool calls - add assistant message with tool_calls to history
+            # There are tool calls - serialize for API-safe message history
+            serialized_tool_calls = [
+                tc.model_dump() if hasattr(tc, "model_dump") else tc
+                for tc in assistant_message.tool_calls
+            ]
             self.messages.append({
                 "role": "assistant",
                 "content": assistant_message.content,
-                "tool_calls": assistant_message.tool_calls
+                "tool_calls": serialized_tool_calls
             })
 
             # The LLM wants to use tools - execute them (show in output - for comprehension)
@@ -116,15 +122,14 @@ class Agent:
             for tool_call in assistant_message.tool_calls:
                 # Extract tool information
                 tool_name = tool_call.function.name
-                    # We convert the JSON arguments, as a dictionary
-                tool_args = json.loads(tool_call.function.arguments)
                 tool_call_id = tool_call.id
-                
                 print(f"  - Calling tool: {tool_name}")
-                print(f"    Arguments: {tool_args}")
-
-                # Execute the tool - add error handling in case something goes wrong with the tool execution
-                tool_result = execute_tool(tool_name, tool_args)
+                try:
+                    tool_args = json.loads(tool_call.function.arguments or "{}")
+                    print(f"    Arguments: {tool_args}")
+                    tool_result = execute_tool(tool_name, tool_args)
+                except json.JSONDecodeError as e:
+                    tool_result = json.dumps({"error": f"Invalid JSON arguments: {e}"})
                 print(f"    Result: {tool_result}")
                 
                 # Add tool result to conversation

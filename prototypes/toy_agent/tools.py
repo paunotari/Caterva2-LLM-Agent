@@ -51,33 +51,27 @@ TOOLS = [
 def calculator(operation: str, a: float, b: float) -> Dict[str, Any]:
     """
     Execute a calculator operation.
-    
+
     Args:
         operation: One of 'add', 'subtract', 'multiply', 'divide'
         a: First number
         b: Second number
-    
+
     Returns:
         Dict with 'result' key containing the answer, or 'error' if operation failed
     """
-    try:
-        if operation == "add":
-            result = a + b
-        elif operation == "subtract":
-            result = a - b
-        elif operation == "multiply":
-            result = a * b
-        elif operation == "divide":
-            if b == 0:
-                return {"error": "Cannot divide by zero"}
-            result = a / b
-        else:
-            return {"error": f"Unknown operation: {operation}"}
-        
-        return {"result": result}
-    
-    except Exception as e:
-        return {"error": str(e)}
+    # Only catch specific errors, not all exceptions
+    if operation == "add":
+        return {"result": a + b}
+    if operation == "subtract":
+        return {"result": a - b}
+    if operation == "multiply":
+        return {"result": a * b}
+    if operation == "divide":
+        if b == 0:
+            return {"error": "Cannot divide by zero"}
+        return {"result": a / b}
+    return {"error": f"Unknown operation: {operation}"}
 
 
 # TOOL DISPATCHER
@@ -92,20 +86,19 @@ TOOL_MAP = {
 def execute_tool(tool_name: str, tool_args: Dict[str, Any]) -> str:
     """
     Execute a tool by name with given arguments.
-    
+
     Args:
         tool_name: Name of the tool to execute (e.g., 'calculator')
         tool_args: Dictionary of arguments to pass to the tool
-    
+
     Returns:
         JSON string containing the tool's result
     """
-    if tool_name not in TOOL_MAP:
+    tool_function = TOOL_MAP.get(tool_name)
+    if tool_function is None:
         return json.dumps({"error": f"Unknown tool: {tool_name}"})
-    
-    # Get the function from our map and call it with unpacked arguments
-    tool_function = TOOL_MAP[tool_name]
-    result = tool_function(**tool_args)
-    
-    # Return as JSON string (this is what we'll send back to the LLM)
+    try:
+        result = tool_function(**tool_args)
+    except TypeError as e:
+        result = {"error": f"Invalid arguments for {tool_name}: {e}"}
     return json.dumps(result)
