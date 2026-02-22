@@ -28,6 +28,10 @@ class Agent:
             {"role": "system", "content": SYSTEM_PROMPT}
         ]
         self.max_iterations = 10  # Prevent infinite loops
+
+        # Track token usage to prevent runaway costs
+        self.total_tokens_used = 0
+        self.max_total_tokens = 50000  # Safety limit per conversation
     
     def run(self, user_input: str) -> str:
         """
@@ -44,6 +48,13 @@ class Agent:
         Returns:
             The agent's final response as a string
         """
+
+        # Check if we've hit our token budget for this conversation
+        if self.total_tokens_used > self.max_total_tokens:
+            return (f"[Token limit reached: {self.total_tokens_used} tokens used. "
+                    f"Please type 'reset' to start a new conversation.]")
+
+
         # Add the user's message to conversation history
         self.messages.append({
             "role": "user",
@@ -54,7 +65,7 @@ class Agent:
         iteration = 0
         while iteration < self.max_iterations:
             iteration += 1
-            
+
             # Call the LLM with current conversation and available tools
             response = client.chat.completions.create(
                 model=MODEL_NAME,
@@ -64,13 +75,25 @@ class Agent:
                 temperature=0.4, # Creativity grade: 0.0-deterministic, 1+ (up to 2)-randomness
                 max_tokens=1024
             )
-            
+
+            # ADDED: Track token usage
+            if hasattr(response, 'usage'):
+                tokens_this_call = response.usage.total_tokens
+                self.total_tokens_used += tokens_this_call
+
+                # Debug output
+                if iteration > 1:
+                    print(f"[Iteration {iteration}: {tokens_this_call} tokens used, "
+                          f"{self.total_tokens_used} total]")
+
             # Get the assistant's response
                 # .choices - response can contain multiple responses (usually we only ask for 1 - e.g. API call n=3)
                 # .message - inside every choice object there's various objects, metadata, etc. (ask Claude for the structure of a response object, we only want the message object)
             assistant_message = response.choices[0].message
 
-            # Check if the LLM wants to use any tools
+            # Debug: print what tool_calls actually is
+            print(f"tool_calls: {assistant_message.tool_calls!r}")
+            # Check if the LLM wants to use any tools (None or empty list means no tools)
             if not assistant_message.tool_calls:
                 # No tool calls - this is the final answer
                 # Add to history before returning
@@ -80,11 +103,15 @@ class Agent:
                 })
                 return assistant_message.content or "I don't have a response."
 
-            # There are tool calls - add assistant message with tool_calls to history
+            # There are tool calls - serialize for API-safe message history
+            serialized_tool_calls = [
+                tc.model_dump() if hasattr(tc, "model_dump") else tc
+                for tc in assistant_message.tool_calls
+            ]
             self.messages.append({
                 "role": "assistant",
                 "content": assistant_message.content,
-                "tool_calls": assistant_message.tool_calls
+                "tool_calls": serialized_tool_calls
             })
 
             # The LLM wants to use tools - execute them (show in output - for comprehension)
@@ -95,15 +122,14 @@ class Agent:
             for tool_call in assistant_message.tool_calls:
                 # Extract tool information
                 tool_name = tool_call.function.name
-                    # We convert the JSON arguments, as a dictionary
-                tool_args = json.loads(tool_call.function.arguments)
                 tool_call_id = tool_call.id
-                
                 print(f"  - Calling tool: {tool_name}")
-                print(f"    Arguments: {tool_args}")
-
-                # Execute the tool - add error handling in case something goes wrong with the tool execution
-                tool_result = execute_tool(tool_name, tool_args)
+                try:
+                    tool_args = json.loads(tool_call.function.arguments or "{}")
+                    print(f"    Arguments: {tool_args}")
+                    tool_result = execute_tool(tool_name, tool_args)
+                except json.JSONDecodeError as e:
+                    tool_result = json.dumps({"error": f"Invalid JSON arguments: {e}"})
                 print(f"    Result: {tool_result}")
                 
                 # Add tool result to conversation
@@ -125,3 +151,5 @@ class Agent:
         self.messages = [
             {"role": "system", "content": SYSTEM_PROMPT}
         ]
+        self.total_tokens_used = 0  # ADDED: Reset token counter
+        print(f"[Conversation and token counter reset]")
