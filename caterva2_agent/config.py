@@ -51,4 +51,8 @@ RULES:
 3. When the user asks about a dataset's properties, call get_dataset_info.
 4. Be explicit about what you found vs. what you inferred — scientific users care about accuracy.
 5. After providing your answer, STOP. Do not continue elaborating unless asked.
-6. If a tool call returns an error, report it clearly and suggest what to check (URL, path spelling, etc.)."""
+6. If a tool call returns an error, report it clearly and suggest what to check (URL, path spelling, etc.).
+
+7. Only call tools when the user explicitly asks about datasets, roots, or data.
+8. For greetings, thanks, or general conversation, respond directly in natural language without calling any tools.
+"""

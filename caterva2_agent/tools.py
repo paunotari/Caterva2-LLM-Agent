@@ -198,6 +198,9 @@ def execute_tool(tool_name: str, tool_args: Dict[str, Any]) -> str:
     if tool_function is None:
         return json.dumps({"error": f"Unknown tool: '{tool_name}'"})
     try:
+        # Defensive: ensure tool_args is always a dict (covers None, "null", etc.)
+        if not isinstance(tool_args, dict):
+            tool_args = {}
         result = tool_function(**tool_args)
     except TypeError as e:
         # Catches wrong argument names or missing required args
