@@ -102,12 +102,17 @@ TOOLS = [
 # This ensures the agent always gets a structured result, even on failure.
 # ---------------------------------------------------------------------------
 
+_cat2_client: cat2.Client | None = None
+
 def _get_client() -> cat2.Client:
     """
-    Create a Caterva2 Client for the configured subscriber URL.
-    Separated into a helper so tools don't repeat the same initialization.
+    Create (if needed) and return a Caterva2 Client for the configured subscriber URL.
+    Only creates the client once and reuses it for all tool calls.
     """
-    return cat2.Client(CATERVA2_URLBASE)
+    global _cat2_client
+    if _cat2_client is None:
+        _cat2_client = cat2.Client(CATERVA2_URLBASE)
+    return _cat2_client
 
 
 def list_roots() -> Dict[str, Any]:
