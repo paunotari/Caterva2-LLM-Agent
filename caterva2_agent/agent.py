@@ -33,6 +33,17 @@ class Agent:
         self.max_iterations = 10     # Prevent infinite tool-call loops
         self.total_tokens_used = 0
         self.max_total_tokens = 50000  # Cost safety limit per conversation
+        # Context window management: keep only the last N messages plus system prompt
+        # This is a simple heuristic; more sophisticated approaches could be implemented if needed (e.g., summarization, relevance scoring).
+        self.max_history_messages = 20  # Tune as needed
+
+    def _get_trimmed_history(self):
+        """Return system prompt + last max_history_messages messages (for LLM context)."""
+        if not self.messages:
+            return []
+        system = self.messages[0]
+        recent = self.messages[1:][-self.max_history_messages:]
+        return [system] + recent
 
     def run(self, user_input: str) -> str:
         """
@@ -64,9 +75,10 @@ class Agent:
             # Call the LLM with the current conversation and tool definitions
             # [PROVIDER: GroqCloud] — tool schema format and response structure
             # follow OpenAI's function calling spec
+            trimmed_history = self._get_trimmed_history()
             response = client.chat.completions.create(
                 model=MODEL_NAME,
-                messages=self.messages,
+                messages=trimmed_history,
                 tools=TOOLS,
                 tool_choice="auto",   # LLM decides whether to call a tool
                 temperature=0.2,      # Low temperature: factual/precise for dataset queries
