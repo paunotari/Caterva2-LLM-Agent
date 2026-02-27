@@ -122,12 +122,15 @@ def list_roots() -> Dict[str, Any]:
     Returns:
         Dict with 'roots' key (list of root name strings), or 'error' on failure.
     """
+    print("→ Listing available roots on the Caterva2 server")
+    print("   API: client.get_roots()")
     try:
         client = _get_client()
         roots_dict = client.get_roots()
         # get_roots() returns {name: {"name": name}, ...} — we extract just the names
         return {"roots": sorted(roots_dict.keys())}
     except Exception as e:
+        print("   ✗ Failed")
         return {"error": f"Failed to connect to Caterva2 server at {CATERVA2_URLBASE}: {e}"}
 
 
@@ -141,6 +144,8 @@ def list_datasets(path: str) -> Dict[str, Any]:
     Returns:
         Dict with 'datasets' key (list of path strings), or 'error' on failure.
     """
+    print(f"→ Listing datasets under path: '{path}'")
+    print(f"   API: client.get_list('{path}')")
     try:
         client = _get_client()
         datasets = client.get_list(path)
@@ -148,6 +153,7 @@ def list_datasets(path: str) -> Dict[str, Any]:
         full_paths = [f"{path}/{name}" for name in datasets]
         return {"path": path, "datasets": full_paths}
     except Exception as e:
+        print("   ✗ Failed")
         return {"error": f"Failed to list datasets at path '{path}': {e}"}
 
 
@@ -161,6 +167,8 @@ def get_dataset_info(path: str) -> Dict[str, Any]:
     Returns:
         Dict with dataset properties (shape, dtype, chunks, etc.), or 'error' on failure.
     """
+    print(f"→ Fetching metadata for dataset: '{path}'")
+    print(f"   API: client.get_info('{path}')")
     try:
         client = _get_client()
         info = client.get_info(path)
@@ -169,6 +177,7 @@ def get_dataset_info(path: str) -> Dict[str, Any]:
                      for k, v in info.items()}
         return {"path": path, "info": safe_info}
     except Exception as e:
+        print("   ✗ Failed")
         return {"error": f"Failed to get info for dataset '{path}': {e}"}
 
 

@@ -13,8 +13,28 @@ This is the same pattern as the toy calculator agent, extended with:
 """
 
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 from config import client, MODEL_NAME, SYSTEM_PROMPT
 from tools import TOOLS, execute_tool
+
+import os
+# Robust log path: project root if possible, else CWD (works in scripts and Jupyter)
+try:
+    PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    LOG_PATH = os.path.join(PROJECT_ROOT, 'agent.log')
+except NameError:
+    LOG_PATH = os.path.join(os.getcwd(), 'agent.log')
+_handler = RotatingFileHandler(LOG_PATH, maxBytes=1_000_000, backupCount=5)
+_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+
+# Use a named logger for our code only — avoids capturing httpx/groq DEBUG noise
+logger = logging.getLogger('caterva2_agent')
+logger.setLevel(logging.DEBUG)
+logger.addHandler(_handler)
+logger.propagate = False  # Don't bubble up to root logger
+
+print(f"[Logging to: {LOG_PATH}]")  # Shows log location for all environments
 
 
 class Agent:
@@ -69,8 +89,10 @@ class Agent:
         self.messages.append({"role": "user", "content": user_input})
 
         iteration = 0
+        logger.info(f"===== New Agent Run | User: {user_input} =====")
         while iteration < self.max_iterations:
             iteration += 1
+            logger.info(f"----- Iteration {iteration} -----")
 
             # Call the LLM with the current conversation and tool definitions
             # [PROVIDER: GroqCloud] — tool schema format and response structure
@@ -89,13 +111,17 @@ class Agent:
             if hasattr(response, "usage"):
                 tokens_this_call = response.usage.total_tokens
                 self.total_tokens_used += tokens_this_call
-                print(f"[Iteration {iteration}: {tokens_this_call} tokens | "
-                      f"{self.total_tokens_used} total]")
+                print(f"[Iteration {iteration}: {tokens_this_call} tokens | {self.total_tokens_used} total]")
+                logger.info(f"Iteration {iteration}: {tokens_this_call} tokens | {self.total_tokens_used} total")
 
             assistant_message = response.choices[0].message
 
-            # Debug: show what the LLM decided to do this iteration
-            print(f"[tool_calls: {assistant_message.tool_calls!r}]")
+            # Log tool names only — raw Pydantic repr is unreadable
+            if assistant_message.tool_calls:
+                names = [tc.function.name for tc in assistant_message.tool_calls]
+                logger.debug(f"LLM requested tool(s): {names}")
+            else:
+                logger.debug("LLM gave final answer (no tool calls)")
 
             # --- No tool calls: this is the final answer ---
             if not assistant_message.tool_calls:
@@ -103,6 +129,7 @@ class Agent:
                     "role": "assistant",
                     "content": assistant_message.content
                 })
+                logger.info("----- Agent Execution Complete -----\n")
                 return assistant_message.content or "[No response from LLM]"
 
             # --- Tool calls: execute each one and feed results back ---
@@ -118,22 +145,24 @@ class Agent:
                 "tool_calls": serialized_tool_calls
             })
 
-            print(f"\n[Agent Loop — Iteration {iteration}]")
-            print(f"  LLM requested {len(assistant_message.tool_calls)} tool call(s)")
-
             for tool_call in assistant_message.tool_calls:
                 tool_name = tool_call.function.name
                 tool_call_id = tool_call.id
 
-                print(f"  → Tool: {tool_name}")
                 try:
                     tool_args = json.loads(tool_call.function.arguments or "{}")
-                    print(f"    Args: {tool_args}")
+                    logger.debug(f"Tool: {tool_name} | Args: {tool_args}")
                     tool_result = execute_tool(tool_name, tool_args)
                 except json.JSONDecodeError as e:
                     tool_result = json.dumps({"error": f"Invalid JSON in tool arguments: {e}"})
 
-                print(f"    Result: {tool_result}")
+                # Pretty-print tool result if JSON
+                try:
+                    parsed = json.loads(tool_result)
+                    pretty = json.dumps(parsed, indent=2)
+                    logger.debug(f"Tool result:\n{pretty}")
+                except Exception:
+                    logger.debug(f"Tool result: {tool_result}")
 
                 # Append tool result — the LLM reads this in the next iteration
                 # role="tool" with matching tool_call_id is required by the API
@@ -146,10 +175,12 @@ class Agent:
 
             # Loop back: LLM will see the tool results and decide the next step
 
+        logger.info("----- Agent Execution Complete (max iterations reached) -----\n")
         return "[Max iterations reached. Please try rephrasing your question.]"
 
     def reset(self):
         """Clear conversation history (keeping only the system prompt) and reset token counter."""
         self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         self.total_tokens_used = 0
+        logger.info("Conversation and token counter reset")
         print("[Conversation and token counter reset]")
