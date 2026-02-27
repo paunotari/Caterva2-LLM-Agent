@@ -57,6 +57,24 @@ class Agent:
         # This is a simple heuristic; more sophisticated approaches could be implemented if needed (e.g., summarization, relevance scoring).
         self.max_history_messages = 20  # Tune as needed
 
+    def _call_llm_with_retry(self, **kwargs):
+        """
+        Call the LLM with exponential backoff retry on transient errors.
+        Implements Layer 3: Resilience & Retry Logic from solid_agent_practices.
+        """
+        import time, random
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                return client.chat.completions.create(**kwargs)
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logger.error(f"LLM call failed after {max_retries} attempts: {e}")
+                    raise
+                wait = (2 ** attempt) + random.uniform(0, 1)
+                logger.warning(f"LLM call failed (attempt {attempt+1}): {e}. Retrying in {wait:.1f}s...")
+                time.sleep(wait)
+
     def _get_trimmed_history(self):
         """Return system prompt + last max_history_messages messages (for LLM context)."""
         if not self.messages:
@@ -98,12 +116,13 @@ class Agent:
             # [PROVIDER: GroqCloud] — tool schema format and response structure
             # follow OpenAI's function calling spec
             trimmed_history = self._get_trimmed_history()
-            response = client.chat.completions.create(
+            # Layer 3: Resilience & Retry Logic
+            response = self._call_llm_with_retry(
                 model=MODEL_NAME,
                 messages=trimmed_history,
                 tools=TOOLS,
-                tool_choice="auto",   # LLM decides whether to call a tool
-                temperature=0.2,      # Low temperature: factual/precise for dataset queries
+                tool_choice="auto",
+                temperature=0.2,
                 max_tokens=1024
             )
 
