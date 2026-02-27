@@ -34,7 +34,7 @@ TOOLS = [
             "description": (
                 "Connect to the Caterva2 server and list all available roots. "
                 "A root is a top-level data collection (like a folder). "
-                "Call this first when the user asks what data is available."
+                "Only call this if the available roots are not already known from the conversation."
             ),
             "parameters": {
                 "type": "object",
@@ -50,7 +50,7 @@ TOOLS = [
             "description": (
                 "List all datasets (arrays and files) within a given root or sub-path. "
                 "Returns paths relative to the given path. "
-                "Use this to discover what datasets exist before fetching their details."
+                "Only call this if the datasets for that path are not already known from the conversation."
             ),
             "parameters": {
                 "type": "object",

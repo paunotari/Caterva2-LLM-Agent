@@ -58,7 +58,7 @@ def main():
                 print(f"[Warning: Long input ({len(user_input)} chars) — may take longer to process]")
 
             # Run the agent
-            print("\nAgent: ", end="", flush=True)
+            print("\nAgent: \n", end="", flush=True)
             response = agent.run(user_input)
             print(response)
 

@@ -130,7 +130,7 @@ class Agent:
                     "content": assistant_message.content
                 })
                 logger.info("----- Agent Execution Complete -----\n")
-                return assistant_message.content or "[No response from LLM]"
+                return "\n" + assistant_message.content or "[No response from LLM]"
 
             # --- Tool calls: execute each one and feed results back ---
             # Serialize tool_calls with .model_dump() before storing in history.
