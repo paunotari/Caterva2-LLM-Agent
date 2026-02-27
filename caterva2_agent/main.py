@@ -9,7 +9,7 @@ Commands:
   reset        — clear conversation history and token counter
 """
 
-from agent import Agent
+from agent import Agent, LOG_PATH
 from config import CATERVA2_URLBASE
 
 
@@ -19,6 +19,7 @@ def main():
     print("Caterva2 Dataset Exploration Agent")
     print("=" * 60)
     print(f"\nConnected to: {CATERVA2_URLBASE}")
+    print(f"Logging to:   {LOG_PATH}")
     print("\nThis agent can:")
     print("  - List available dataset roots on the server")
     print("  - Browse datasets within a root")

@@ -14,11 +14,12 @@ This is the same pattern as the toy calculator agent, extended with:
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import RotatingFileHandler
 from config import client, MODEL_NAME, SYSTEM_PROMPT
 from tools import TOOLS, execute_tool
-
 import os
+
 # Robust log path: project root if possible, else CWD (works in scripts and Jupyter)
 try:
     PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -34,7 +35,28 @@ logger.setLevel(logging.DEBUG)
 logger.addHandler(_handler)
 logger.propagate = False  # Don't bubble up to root logger
 
-print(f"[Logging to: {LOG_PATH}]")  # Shows log location for all environments
+def _run_tool(tool_call) -> tuple:
+    """
+    Execute a single tool call and return (tool_call_id, tool_name, tool_result).
+    Module-level helper (not a method) because it needs no instance state —
+    only logger and execute_tool, both available at module scope.
+    Used by the agent loop to run tool calls in parallel via ThreadPoolExecutor.
+    """
+    t_name = tool_call.function.name
+    try:
+        t_args = json.loads(tool_call.function.arguments or "{}")
+        logger.debug(f"Tool: {t_name} | Args: {t_args}")
+        t_result = execute_tool(t_name, t_args)
+    except json.JSONDecodeError as e:
+        t_result = json.dumps({"error": f"Invalid JSON in tool arguments: {e}"})
+
+    try:
+        pretty = json.dumps(json.loads(t_result), indent=2)
+        logger.debug(f"Tool result:\n{pretty}")
+    except Exception:
+        logger.debug(f"Tool result: {t_result}")
+
+    return tool_call.id, t_name, t_result
 
 
 class Agent:
@@ -151,9 +173,11 @@ class Agent:
                 logger.info("----- Agent Execution Complete -----\n")
                 return "\n" + assistant_message.content or "[No response from LLM]"
 
-            # --- Tool calls: execute each one and feed results back ---
-            # Serialize tool_calls with .model_dump() before storing in history.
-            # The raw Pydantic objects are not JSON-safe for the API.
+            # --- Tool calls: execute in parallel ---
+            # All tool calls within a single LLM response are independent by design —
+            # dependent calls always arrive in separate LLM turns.
+            # ThreadPoolExecutor is used (not asyncio) because the Caterva2 library
+            # is synchronous; threads are the right tool for parallel I/O-bound work.
             serialized_tool_calls = [
                 tc.model_dump() if hasattr(tc, "model_dump") else tc
                 for tc in assistant_message.tool_calls
@@ -164,27 +188,14 @@ class Agent:
                 "tool_calls": serialized_tool_calls
             })
 
-            for tool_call in assistant_message.tool_calls:
-                tool_name = tool_call.function.name
-                tool_call_id = tool_call.id
+            # Submit all tool calls at once — they run in parallel across threads
+            with ThreadPoolExecutor() as executor:
+                futures = [executor.submit(_run_tool, tc) for tc in assistant_message.tool_calls]
 
-                try:
-                    tool_args = json.loads(tool_call.function.arguments or "{}")
-                    logger.debug(f"Tool: {tool_name} | Args: {tool_args}")
-                    tool_result = execute_tool(tool_name, tool_args)
-                except json.JSONDecodeError as e:
-                    tool_result = json.dumps({"error": f"Invalid JSON in tool arguments: {e}"})
-
-                # Pretty-print tool result if JSON
-                try:
-                    parsed = json.loads(tool_result)
-                    pretty = json.dumps(parsed, indent=2)
-                    logger.debug(f"Tool result:\n{pretty}")
-                except Exception:
-                    logger.debug(f"Tool result: {tool_result}")
-
-                # Append tool result — the LLM reads this in the next iteration
-                # role="tool" with matching tool_call_id is required by the API
+            # Collect results in original order — futures[i] matches tool_calls[i]
+            # Order matters: the API expects results in the same sequence as the requests
+            for future in futures:
+                tool_call_id, tool_name, tool_result = future.result()
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
