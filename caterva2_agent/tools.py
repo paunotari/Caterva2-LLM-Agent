@@ -59,7 +59,9 @@ TOOLS = [
                         "type": "string",
                         "description": (
                             "The root name or sub-path to list. "
-                            "Example: 'example' or 'example/dir1'"
+                            "Root names always start with '@' (e.g. '@public'). "
+                            "Use the exact root name returned by list_roots — never drop the '@' prefix. "
+                            "Sub-paths use '/' as separator (e.g. '@public/examples')."
                         )
                     }
                 },
@@ -84,7 +86,9 @@ TOOLS = [
                         "type": "string",
                         "description": (
                             "Full path to the dataset including the root name. "
-                            "Example: 'example/ds-2d-fields.b2nd'"
+                            "Root names always start with '@'. "
+                            "Use the exact paths returned by list_datasets — never drop the '@' prefix. "
+                            "Example: '@public/examples/ds-2d-fields.b2nd'"
                         )
                     }
                 },
