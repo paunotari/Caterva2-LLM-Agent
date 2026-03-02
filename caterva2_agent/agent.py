@@ -49,6 +49,11 @@ def _run_tool(tool_call) -> tuple:
         t_result = execute_tool(t_name, t_args)
     except json.JSONDecodeError as e:
         t_result = json.dumps({"error": f"Invalid JSON in tool arguments: {e}"})
+    except Exception as e:
+        # Catches any unexpected exception that escapes execute_tool()
+        # Returns an error result rather than crashing the whole agent loop
+        logger.error(f"Unexpected error executing tool '{t_name}': {e}")
+        t_result = json.dumps({"error": f"Tool execution failed: {e}"})
 
     try:
         pretty = json.dumps(json.loads(t_result), indent=2)

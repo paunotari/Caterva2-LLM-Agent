@@ -34,7 +34,6 @@ def main():
     while True:
         try:
             user_input = input("\nYou: ").strip()
-            print(f"[DEBUG received: {repr(user_input)}]")
 
             # Handle control commands
             if user_input.lower() in ["quit", "exit"]:
