@@ -23,7 +23,7 @@ if not api_key:
 client = Groq(api_key=api_key)  # [PROVIDER: GroqCloud]
 
 # Groq model to use. Change here to swap models without touching agent logic.
-MODEL_NAME = "llama-3.3-70b-versatile"
+MODEL_NAME = "openai/gpt-oss-120b"
 
 # --- Caterva2 Setup ---
 
