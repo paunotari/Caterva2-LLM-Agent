@@ -48,8 +48,11 @@ TOOLS = [
         "function": {
             "name": "list_datasets",
             "description": (
-                "List all datasets (arrays and files) within a given root or sub-path. "
-                "Returns paths relative to the given path. "
+                "List datasets (arrays and files) within a given root or sub-path. "
+                "Results are paginated: use 'limit' and 'offset' to navigate large listings. "
+                "The response always includes 'total' (full count) and 'has_more' so you can "
+                "tell the user if more results exist. To show the next page, call again with "
+                "offset increased by limit. "
                 "Only call this if the datasets for that path are not already known from the conversation."
             ),
             "parameters": {
@@ -63,6 +66,14 @@ TOOLS = [
                             "Use the exact root name returned by list_roots — never drop the '@' prefix. "
                             "Sub-paths use '/' as separator (e.g. '@public/examples')."
                         )
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of datasets to return per page. Defaults to 50. Larger values are allowed if the user requests all datasets."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Number of datasets to skip before returning results. Defaults to 0."
                     }
                 },
                 "required": ["path"]
@@ -138,24 +149,40 @@ def list_roots() -> Dict[str, Any]:
         return {"error": f"Failed to connect to Caterva2 server at {CATERVA2_URLBASE}: {e}"}
 
 
-def list_datasets(path: str) -> Dict[str, Any]:
+def list_datasets(path: str, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
     """
-    List all datasets within a root or sub-path on the Caterva2 server.
+    List datasets within a root or sub-path on the Caterva2 server.
+
+    get_list() always returns the full list from the server (no server-side pagination).
+    We slice the result here (client-side pagination) to avoid flooding the LLM context window.
+    The recommended page size is 50, but there is no enforced cap — the caller can request
+    any limit, including a large value to retrieve all datasets at once.
 
     Args:
-        path: Root name or sub-path (e.g. 'example' or 'example/dir1')
+        path:   Root name or sub-path (e.g. '@public' or '@public/examples')
+        limit:  Requested page size — recommended 50, no enforced maximum
+        offset: Number of results to skip, for pagination (default 0)
 
     Returns:
-        Dict with 'datasets' key (list of path strings), or 'error' on failure.
+        Dict with 'datasets' (one page), 'total', 'offset', and 'has_more',
+        or 'error' on failure.
     """
-    print(f"→ Listing datasets under path: '{path}'")
+    print(f"→ Listing datasets under path: '{path}' (offset={offset}, limit={limit})")
     print(f"   API: client.get_list('{path}')")
     try:
         client = _get_client()
         datasets = client.get_list(path)
-        # Prefix results with the path so full paths are immediately usable
+        # Prefix results with the path so full paths are immediately usable by other tools
         full_paths = [f"{path}/{name}" for name in datasets]
-        return {"path": path, "datasets": full_paths}
+        total = len(full_paths)
+        page = full_paths[offset: offset + limit]
+        return {
+            "path": path,
+            "datasets": page,
+            "total": total,
+            "offset": offset,
+            "has_more": (offset + limit) < total,
+        }
     except Exception as e:
         print("   ✗ Failed")
         return {"error": f"Failed to list datasets at path '{path}': {e}"}
