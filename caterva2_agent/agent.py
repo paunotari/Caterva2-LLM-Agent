@@ -14,6 +14,8 @@ This is the same pattern as the toy calculator agent, extended with:
 
 import json
 import logging
+import random
+import time
 from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import RotatingFileHandler
 from config import client, MODEL_NAME, SYSTEM_PROMPT
@@ -89,7 +91,6 @@ class Agent:
         Call the LLM with exponential backoff retry on transient errors.
         Implements Layer 3: Resilience & Retry Logic from solid_agent_practices.
         """
-        import time, random
         max_retries = 3
         for attempt in range(max_retries):
             try:
