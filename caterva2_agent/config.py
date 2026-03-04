@@ -9,10 +9,13 @@ Centralizes:
 """
 
 import os
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 from groq import Groq  # [PROVIDER: GroqCloud]
 
-load_dotenv()  # Must be called BEFORE os.getenv()
+# find_dotenv() searches upward from CWD until it finds .env
+# This makes config.py work correctly whether Python is invoked from the
+# project root (CLI), from caterva2_agent/ (direct), or from a Jupyter notebook.
+load_dotenv(find_dotenv())
 
 # --- LLM Setup ---
 
