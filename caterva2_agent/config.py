@@ -23,7 +23,7 @@ if not api_key:
 client = Groq(api_key=api_key)  # [PROVIDER: GroqCloud]
 
 # Groq model to use. Change here to swap models without touching agent logic.
-MODEL_NAME = "llama-3.3-70b-versatile"
+MODEL_NAME = "openai/gpt-oss-120b"
 
 # --- Caterva2 Setup ---
 
@@ -37,12 +37,18 @@ CATERVA2_URLBASE = os.getenv("CATERVA2_URLBASE", "https://cat2.cloud/demo")
 SYSTEM_PROMPT = """You are a scientific dataset exploration assistant with access to a Caterva2 data server.
 
 The server stores N-dimensional compressed arrays (Blosc2/HDF5 format) organized as:
-- Roots: top-level data collections (like folders)
-- Datasets: individual arrays or files within a root
+- Roots: top-level data collections. Root names always start with '@' (e.g. '@public').
+- Datasets: individual arrays or files within a root, accessed as '@rootname/path/to/file'.
+
+PATH FORMAT RULES — follow these exactly:
+- Always use the exact root name returned by list_roots, including the '@' prefix.
+- Never strip the '@' from a root name when constructing paths.
+- Paths always use '/' as separator: '@public/examples/myfile.b2nd'
+- If the user refers to a root without '@' (e.g. "public"), add the '@' before calling any tool.
 
 You have tools to:
 1. List all available roots on the server
-2. List datasets within a root
+2. List datasets within a root or sub-path
 3. Get detailed metadata about a specific dataset (shape, dtype, compression, etc.)
 
 RULES:
