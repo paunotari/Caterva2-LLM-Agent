@@ -31,7 +31,7 @@ A LLM Agent for operating on and visualizing scientific datasets using natural l
 **Key features:**
 - Browse and query remote Caterva2 Blosc2/HDF5 datasets
 - Visualize dataset contents as plots, charts
-- Visualize multidimensional scientific renders — including tomographic imaging and N-dimensional array inspection
+- Visualize multidimensional renders — including tomographic imaging and N-dimensional array inspection
 - Natural language interaction — no API knowledge required
 - Extensible tool architecture for custom workflows
 
