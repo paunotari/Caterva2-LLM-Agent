@@ -56,11 +56,99 @@ A minimal calculator agent designed as a hands-on introduction to LLM agent arch
 
 ### Prerequisites
 
-- Python **≤ 3.12**
+- Use **Python 3.12** (recommended). Most modern tools (Poetry, Groq SDK, etc.) do NOT yet support Python 3.14. And Caterva2 API requires Python >= 3.11 
+- [Poetry](https://python-poetry.org/) for dependency management
 - An API key for your preferred LLM provider — if you don't have one, [Groq](https://console.groq.com/) offers a free tier to get started
 
+#### How to install Python 3.12 (macOS/Linux):
 
-Each agent directory contains its own `README.md` with complete setup and usage instructions.
+Option 1: Homebrew (recommended for macOS users)
+```bash
+brew install python@3.12
+```
+
+
+```bash
+# IMPORTANT: Add Python 3.12 to your PATH (for Homebrew installs)
+echo 'export PATH="/opt/homebrew/opt/python@3.12/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+Option 2: pyenv (works on macOS and Linux)
+```bash
+pyenv install 3.12.2
+```
+```bash
+pyenv global 3.12.2
+```
+
+After installing, make sure python3.12 is available in your PATH:
+```bash
+python3.12 --version
+```
+
+
+### Installation
+
+1. **Install Poetry** (if you haven't already):
+
+> **Important:** Always use `python3.12` (not just `python3`) to install Poetry, to avoid SSL and compatibility errors if your system default is Python 3.14.
+
+```bash
+curl -sSL https://install.python-poetry.org | python3.12 -
+```
+
+You can test that everything is set up by running:
+```bash
+poetry --version
+```
+
+2. **Clone the repository and install dependencies:**
+```bash
+git clone <https://github.com/paunotari/Caterva2-LLM-Agent>
+```
+```bash
+# Change to the project directory (adjust path if you cloned elsewhere)
+cd Caterva-LLM-Agent
+```
+```bash
+poetry install --no-root
+```
+Poetry automatically creates an isolated virtual environment and installs all dependencies pinned to exact versions via `poetry.lock`.
+
+> **Note:** If you see an error like "No file/folder found for package caterva2-llm-agent", it's because this project is not a Python package (just scripts). Use poetry install --no-root to avoid this, or set package-mode = false in pyproject.toml.
+
+3. **Add your LLM provider API key** — create a `.env` file at the project root:
+```bash
+echo "GROQ_API_KEY=your-api-key-here" > .env
+```
+
+4. **Run an agent:**
+
+You can interact with the Caterva2 Agent in two ways:
+
+- **Jupyter Lab (Recommended for scientific exploration):**
+  ```bash
+  poetry run jupyter lab
+  ```
+- **Command Line Interface (CLI):**
+  ```bash
+  # Caterva2 agent (main agent)
+  poetry run python caterva2_agent/main.py
+
+  # Toy agent (learning reference)
+  poetry run python prototypes/toy_agent/main.py
+  ```
+  Or simply run the main.py files from your favorite IDE (VSCode, PyCharm, etc.) — just make sure your IDE is using the Poetry virtual environment as the
+  interpreter.
+
+Or activate the Poetry shell once and run commands directly:
+```bash
+poetry shell
+python caterva2_agent/main.py   # CLI
+jupyter lab                     # Jupyter Lab (in the same shell)
+```
+
 
 ---
 
@@ -73,6 +161,8 @@ Each agent directory contains its own `README.md` with complete setup and usage 
 ├── prototypes/
 │   └── toy_agent/           # Toy agent for learning the very basics behind agents
 │       └── README.md
+├── pyproject.toml           # Project dependencies (Poetry)
+├── poetry.lock              # Pinned dependency versions (auto-generated)
 └── README.md
 ```
 
