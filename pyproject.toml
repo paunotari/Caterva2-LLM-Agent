@@ -9,7 +9,8 @@ packages = [{include = "caterva2_agent"}]
 [tool.poetry.dependencies]
 python = ">=3.11,<3.13"
 python-dotenv = "^1.0"
-groq = "^0.4.0"
+groq = "^0.11.0"
+httpx = ">=0.23.0,<0.28.0"
 caterva2 = "^2025.12.3"
 ipywidgets = "^8.1.8"
 jupyterlab = "^4.5.6"
