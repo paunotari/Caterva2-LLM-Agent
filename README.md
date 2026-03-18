@@ -112,11 +112,9 @@ git clone <https://github.com/paunotari/Caterva2-LLM-Agent>
 cd Caterva-LLM-Agent
 ```
 ```bash
-poetry install --no-root
+poetry install --all-groups
 ```
-Poetry automatically creates an isolated virtual environment and installs all dependencies pinned to exact versions via `poetry.lock`.
-
-> **Note:** If you see an error like "No file/folder found for package caterva2-llm-agent", it's because this project is not a Python package (just scripts). Use poetry install --no-root to avoid this, or set package-mode = false in pyproject.toml.
+Poetry automatically creates an isolated virtual environment and installs all dependencies (including dev dependencies like pytest) pinned to exact versions via `poetry.lock`. The project is installed as an editable package so imports work correctly in tests and notebooks.
 
 3. **Add your LLM provider API key** — create a `.env` file at the project root:
 ```bash
