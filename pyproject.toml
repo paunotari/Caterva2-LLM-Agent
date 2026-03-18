@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "caterva2-llm-agent"
+version = "0.1.0"
+description = "A LLM Agent for Exploration and Manipulation of Blosc2/HDF5 Datasets in Caterva2"
+authors = ["paunotari"]
+readme = "README.md"
+packages = [{include = "caterva2_agent"}]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.13"
+python-dotenv = "^1.0"
+groq = "^0.4.0"
+caterva2 = "^2025.12.3"
+ipywidgets = "^8.1.8"
+jupyterlab = "^4.5.6"
+ipykernel = "^7.2.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^9.0.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
