@@ -25,9 +25,14 @@ import os
 # Robust log path: project root if possible, else CWD (works in scripts and Jupyter)
 try:
     PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    LOG_PATH = os.path.join(PROJECT_ROOT, 'agent.log')
+    LOGS_DIR = os.path.join(PROJECT_ROOT, 'logs')
+    os.makedirs(LOGS_DIR, exist_ok=True)  # Create logs/ if it doesn't exist
+    LOG_PATH = os.path.join(LOGS_DIR, 'agent.log')
 except NameError:
-    LOG_PATH = os.path.join(os.getcwd(), 'agent.log')
+    # Fallback for interactive environments (Jupyter, REPL)
+    LOGS_DIR = os.path.join(os.getcwd(), 'logs')
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    LOG_PATH = os.path.join(LOGS_DIR, 'agent.log')
 _handler = RotatingFileHandler(LOG_PATH, maxBytes=1_000_000, backupCount=5)
 _handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
 

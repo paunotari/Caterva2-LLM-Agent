@@ -36,5 +36,11 @@ class _FakeClient:
         self.url = _url
 
 
+class _FakeDataset:
+    """Stub Dataset class for type annotation in tools.py."""
+    pass
+
+
 fake_caterva2.Client = _FakeClient
+fake_caterva2.Dataset = _FakeDataset
 sys.modules["caterva2"] = fake_caterva2
