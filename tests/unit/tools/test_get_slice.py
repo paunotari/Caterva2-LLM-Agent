@@ -173,3 +173,31 @@ def test_get_slice_step_syntax(monkeypatch) -> None:
 
     assert "error" not in result
     assert result["data"] == [0, 2, 4, 6, 8]
+
+
+def test_get_slice_includes_summary(monkeypatch) -> None:
+    # What this tests: result includes pre-computed summary for LLM presentation.
+    # Why important: enables LLM to present summaries instead of raw data dumps.
+    monkeypatch.setattr(tools, "_get_dataset", lambda _path: _FakeDataset1D())
+    result = tools.get_slice("@public/example.b2nd", slices="0:50")
+
+    assert "error" not in result
+    assert "summary" in result
+    
+    summary = result["summary"]
+    assert summary["num_elements"] == 50
+    assert summary["min"] == 0
+    assert summary["max"] == 49
+    assert "mean" in summary
+    assert "preview" in summary
+
+
+def test_get_slice_large_result_includes_hint(monkeypatch) -> None:
+    # What this tests: large results include hint for LLM to use summary.
+    # Why important: guides LLM behavior for better UX.
+    monkeypatch.setattr(tools, "_get_dataset", lambda _path: _FakeDataset2D())
+    result = tools.get_slice("@public/example.b2nd", slices="0:20, 0:10")  # 200 elements
+
+    assert "error" not in result
+    assert "_hint" in result
+    assert "summary" in result["_hint"].lower()

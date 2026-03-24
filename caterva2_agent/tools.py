@@ -511,6 +511,49 @@ def _default_slice_for_shape(shape: tuple, max_elements: int) -> tuple:
     return tuple(slices)
 
 
+def _generate_preview(data, max_chars: int = 200) -> str:
+    """
+    Generate a truncated string preview of array data.
+    
+    Shows the structure without overwhelming the output.
+    """
+    full_str = str(data.tolist() if hasattr(data, 'tolist') else data)
+    if len(full_str) <= max_chars:
+        return full_str
+    return full_str[:max_chars] + "..."
+
+
+def _compute_summary(data) -> Dict[str, Any]:
+    """
+    Compute summary statistics for slice data.
+    
+    Pre-computes stats so the LLM can present a summary without
+    showing all raw values. Also prepares for future viz tools.
+    """
+    import numpy as np
+    
+    arr = np.asarray(data)
+    num_elements = arr.size
+    
+    summary = {
+        "num_elements": num_elements,
+        "preview": _generate_preview(arr),
+    }
+    
+    # Only compute numeric stats for numeric dtypes
+    if np.issubdtype(arr.dtype, np.number):
+        summary["min"] = _to_json_safe(arr.min())
+        summary["max"] = _to_json_safe(arr.max())
+        summary["mean"] = _to_json_safe(arr.mean())
+    
+    return summary
+
+
+# Threshold for auto-including full data vs summary-only
+# Below this, include full data; above, LLM should use summary
+SUMMARY_THRESHOLD = 100
+
+
 def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
     """
     Retrieve a slice of data from a dataset.
@@ -518,12 +561,16 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
     Parses Python-style slice syntax and enforces a maximum element limit
     to protect the LLM context window from huge data dumps.
     
+    Returns both raw data and a pre-computed summary. For large results
+    (>100 elements), the LLM should present the summary and offer to
+    show full data on request.
+    
     Args:
         path: Full path to dataset (e.g. '@public/examples/ds-1d.b2nd')
         slices: Python slice syntax (e.g. '0:100', '0:5, 0:3')
     
     Returns:
-        Dict with slice metadata and data values, or 'error' on failure.
+        Dict with slice metadata, summary, and data values, or 'error' on failure.
     """
     print(f"→ Getting slice from dataset: '{path}'")
     print(f"   Requested slice: {slices or '(default)'}")
@@ -556,6 +603,10 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
         
         # Fetch the data — __getitem__ returns numpy array
         data = dataset[slice_tuple]
+        data_json = _to_json_safe(data)
+        
+        # Pre-compute summary for LLM presentation
+        summary = _compute_summary(data)
         
         result = {
             "path": path,
@@ -563,8 +614,16 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
             "dtype": str(dataset.dtype),
             "slice": slice_str_used,
             "result_shape": list(data.shape) if hasattr(data, 'shape') else [],
-            "data": _to_json_safe(data)
+            "summary": summary,
+            "data": data_json
         }
+        
+        # Hint for the LLM on how to present results
+        if summary["num_elements"] > SUMMARY_THRESHOLD:
+            result["_hint"] = (
+                f"Large result ({summary['num_elements']} elements). "
+                "Present the summary to the user and offer to show full data if requested."
+            )
         
         return result
     
