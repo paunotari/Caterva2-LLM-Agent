@@ -11,21 +11,8 @@ import numpy as np
 def _ensure_local_import_bootstrap() -> None:
     """Make direct file execution work (PyCharm 'Run file') as well as pytest runs."""
     project_root = Path(__file__).resolve().parents[3]
-    agent_dir = project_root / "caterva2_agent"
-    if str(agent_dir) not in sys.path:
-        sys.path.insert(0, str(agent_dir))
-
-    if "config" not in sys.modules:
-        fake_config = types.ModuleType("config")
-        fake_config.CATERVA2_URLBASE = "http://test-caterva2.local"
-        fake_config.MODEL_NAME = "test-model"
-        fake_config.SYSTEM_PROMPT = "test system prompt"
-        fake_config.client = types.SimpleNamespace(
-            chat=types.SimpleNamespace(
-                completions=types.SimpleNamespace(create=lambda **kwargs: None)
-            )
-        )
-        sys.modules["config"] = fake_config
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
 
     if "caterva2" not in sys.modules:
         fake_caterva2 = types.ModuleType("caterva2")
@@ -35,16 +22,33 @@ def _ensure_local_import_bootstrap() -> None:
                 self.url = _url
 
         class _FakeDataset:
-            """Stub Dataset class for type annotation."""
             pass
 
         fake_caterva2.Client = _FakeClient
         fake_caterva2.Dataset = _FakeDataset
         sys.modules["caterva2"] = fake_caterva2
 
+    if "caterva2_agent.prompts" not in sys.modules:
+        fake_prompts = types.ModuleType("caterva2_agent.prompts")
+        fake_prompts.SYSTEM_PROMPT = "test system prompt"
+        sys.modules["caterva2_agent.prompts"] = fake_prompts
+
+    if "caterva2_agent.config" not in sys.modules:
+        fake_config = types.ModuleType("caterva2_agent.config")
+        fake_config.CATERVA2_URLBASE = "http://test-caterva2.local"
+        fake_config.MODEL_NAME = "test-model"
+        fake_config.SYSTEM_PROMPT = "test system prompt"
+        fake_config.client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(
+                completions=types.SimpleNamespace(create=lambda **kwargs: None)
+            )
+        )
+        sys.modules["caterva2_agent.config"] = fake_config
+        sys.modules["config"] = fake_config
+
 
 _ensure_local_import_bootstrap()
-import tools
+from caterva2_agent.tools import data_access
 
 
 class _FakeDataset1D:
@@ -86,8 +90,8 @@ class _FakeDatasetHuge:
 def test_get_slice_returns_data_1d(monkeypatch) -> None:
     # What this tests: basic 1D slice returns correct data and metadata.
     # Why important: core functionality for data retrieval.
-    monkeypatch.setattr(tools, "_get_dataset", lambda _path: _FakeDataset1D())
-    result = tools.get_slice("@public/example.b2nd", slices="0:10")
+    monkeypatch.setattr(data_access, "_get_dataset", lambda _path: _FakeDataset1D())
+    result = data_access.get_slice("@public/example.b2nd", slices="0:10")
 
     assert "error" not in result
     assert result["path"] == "@public/example.b2nd"
@@ -101,8 +105,8 @@ def test_get_slice_returns_data_1d(monkeypatch) -> None:
 def test_get_slice_returns_data_2d(monkeypatch) -> None:
     # What this tests: 2D slice with multi-dimension syntax works.
     # Why important: scientific data is often multi-dimensional.
-    monkeypatch.setattr(tools, "_get_dataset", lambda _path: _FakeDataset2D())
-    result = tools.get_slice("@public/example.b2nd", slices="0:3, 0:2")
+    monkeypatch.setattr(data_access, "_get_dataset", lambda _path: _FakeDataset2D())
+    result = data_access.get_slice("@public/example.b2nd", slices="0:3, 0:2")
 
     assert "error" not in result
     assert result["dataset_shape"] == [100, 50]
@@ -115,8 +119,8 @@ def test_get_slice_returns_data_2d(monkeypatch) -> None:
 def test_get_slice_default_slice_respects_limit(monkeypatch) -> None:
     # What this tests: when no slice provided, defaults to safe limit.
     # Why important: protects LLM context from huge data dumps.
-    monkeypatch.setattr(tools, "_get_dataset", lambda _path: _FakeDataset1D())
-    result = tools.get_slice("@public/example.b2nd")  # No slice specified
+    monkeypatch.setattr(data_access, "_get_dataset", lambda _path: _FakeDataset1D())
+    result = data_access.get_slice("@public/example.b2nd")  # No slice specified
 
     assert "error" not in result
     # Should return at most MAX_SLICE_ELEMENTS (1000 < 10000, so returns all)
@@ -126,8 +130,8 @@ def test_get_slice_default_slice_respects_limit(monkeypatch) -> None:
 def test_get_slice_rejects_oversized_request(monkeypatch) -> None:
     # What this tests: requests exceeding element limit are rejected with clear error.
     # Why important: prevents memory issues and LLM context overflow.
-    monkeypatch.setattr(tools, "_get_dataset", lambda _path: _FakeDatasetHuge())
-    result = tools.get_slice("@public/huge.b2nd", slices="0:100, 0:200, 0:200")
+    monkeypatch.setattr(data_access, "_get_dataset", lambda _path: _FakeDatasetHuge())
+    result = data_access.get_slice("@public/huge.b2nd", slices="0:100, 0:200, 0:200")
     
     # 100 * 200 * 200 = 4,000,000 elements — should be rejected
     assert "error" in result
@@ -138,8 +142,8 @@ def test_get_slice_rejects_oversized_request(monkeypatch) -> None:
 def test_get_slice_invalid_syntax_returns_error(monkeypatch) -> None:
     # What this tests: invalid slice syntax returns clear error, not exception.
     # Why important: agent must handle bad LLM-generated input gracefully.
-    monkeypatch.setattr(tools, "_get_dataset", lambda _path: _FakeDataset1D())
-    result = tools.get_slice("@public/example.b2nd", slices="not:valid:slice:syntax")
+    monkeypatch.setattr(data_access, "_get_dataset", lambda _path: _FakeDataset1D())
+    result = data_access.get_slice("@public/example.b2nd", slices="not:valid:slice:syntax")
 
     assert "error" in result
     assert "Invalid slice" in result["error"]
@@ -148,8 +152,8 @@ def test_get_slice_invalid_syntax_returns_error(monkeypatch) -> None:
 def test_get_slice_too_many_dimensions_returns_error(monkeypatch) -> None:
     # What this tests: slice with more dimensions than dataset is rejected.
     # Why important: prevents confusing numpy errors.
-    monkeypatch.setattr(tools, "_get_dataset", lambda _path: _FakeDataset1D())
-    result = tools.get_slice("@public/example.b2nd", slices="0:10, 0:5")  # 2D slice on 1D data
+    monkeypatch.setattr(data_access, "_get_dataset", lambda _path: _FakeDataset1D())
+    result = data_access.get_slice("@public/example.b2nd", slices="0:10, 0:5")  # 2D slice on 1D data
 
     assert "error" in result
     assert "Too many dimensions" in result["error"]
@@ -158,8 +162,8 @@ def test_get_slice_too_many_dimensions_returns_error(monkeypatch) -> None:
 def test_get_slice_negative_indices(monkeypatch) -> None:
     # What this tests: Python-style negative indices work.
     # Why important: common user pattern for "last N elements".
-    monkeypatch.setattr(tools, "_get_dataset", lambda _path: _FakeDataset1D())
-    result = tools.get_slice("@public/example.b2nd", slices="-5:")
+    monkeypatch.setattr(data_access, "_get_dataset", lambda _path: _FakeDataset1D())
+    result = data_access.get_slice("@public/example.b2nd", slices="-5:")
 
     assert "error" not in result
     assert result["data"] == [995, 996, 997, 998, 999]
@@ -168,8 +172,8 @@ def test_get_slice_negative_indices(monkeypatch) -> None:
 def test_get_slice_step_syntax(monkeypatch) -> None:
     # What this tests: step parameter in slice (start:stop:step) works.
     # Why important: allows downsampling large arrays.
-    monkeypatch.setattr(tools, "_get_dataset", lambda _path: _FakeDataset1D())
-    result = tools.get_slice("@public/example.b2nd", slices="0:10:2")
+    monkeypatch.setattr(data_access, "_get_dataset", lambda _path: _FakeDataset1D())
+    result = data_access.get_slice("@public/example.b2nd", slices="0:10:2")
 
     assert "error" not in result
     assert result["data"] == [0, 2, 4, 6, 8]
@@ -178,8 +182,8 @@ def test_get_slice_step_syntax(monkeypatch) -> None:
 def test_get_slice_includes_summary(monkeypatch) -> None:
     # What this tests: result includes pre-computed summary for LLM presentation.
     # Why important: enables LLM to present summaries instead of raw data dumps.
-    monkeypatch.setattr(tools, "_get_dataset", lambda _path: _FakeDataset1D())
-    result = tools.get_slice("@public/example.b2nd", slices="0:50")
+    monkeypatch.setattr(data_access, "_get_dataset", lambda _path: _FakeDataset1D())
+    result = data_access.get_slice("@public/example.b2nd", slices="0:50")
 
     assert "error" not in result
     assert "summary" in result
@@ -195,8 +199,8 @@ def test_get_slice_includes_summary(monkeypatch) -> None:
 def test_get_slice_large_result_includes_hint(monkeypatch) -> None:
     # What this tests: large results include hint for LLM to use summary.
     # Why important: guides LLM behavior for better UX.
-    monkeypatch.setattr(tools, "_get_dataset", lambda _path: _FakeDataset2D())
-    result = tools.get_slice("@public/example.b2nd", slices="0:20, 0:10")  # 200 elements
+    monkeypatch.setattr(data_access, "_get_dataset", lambda _path: _FakeDataset2D())
+    result = data_access.get_slice("@public/example.b2nd", slices="0:20, 0:10")  # 200 elements
 
     assert "error" not in result
     assert "_hint" in result

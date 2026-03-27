@@ -9,8 +9,8 @@ Commands:
   reset        — clear conversation history and token counter
 """
 
-from agent import Agent, LOG_PATH
-from config import CATERVA2_URLBASE
+from caterva2_agent.agent import Agent, LOG_PATH
+from caterva2_agent.config import CATERVA2_URLBASE
 
 
 def main():

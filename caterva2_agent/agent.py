@@ -9,7 +9,7 @@ The loop works as follows:
 
 This is the same pattern as the toy calculator agent, extended with:
 - A Caterva2-specific system prompt
-- Three dataset exploration tools instead of a calculator
+- Dataset exploration tools (browsing, analysis, data_access)
 """
 
 import json
@@ -18,9 +18,10 @@ import random
 import time
 from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import RotatingFileHandler
-from config import client, MODEL_NAME, SYSTEM_PROMPT
-from tools import TOOLS, execute_tool
 import os
+
+from caterva2_agent.config import client, MODEL_NAME, SYSTEM_PROMPT
+from caterva2_agent.tools import TOOLS, execute_tool
 
 # Robust log path: project root if possible, else CWD (works in scripts and Jupyter)
 try:

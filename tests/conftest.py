@@ -7,15 +7,54 @@ import types
 from pathlib import Path
 
 
-# Make `agent.py` / `tools.py` importable as top-level modules for tests.
+# ---------------------------------------------------------------------------
+# PATH SETUP
+# Add project root to sys.path so caterva2_agent package is importable.
+# ---------------------------------------------------------------------------
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CATERVA2_AGENT_DIR = PROJECT_ROOT / "caterva2_agent"
-if str(CATERVA2_AGENT_DIR) not in sys.path:
-    sys.path.insert(0, str(CATERVA2_AGENT_DIR))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 
-# Provide a lightweight fake `config` module so tests do not depend on real API keys.
-fake_config = types.ModuleType("config")
+# ---------------------------------------------------------------------------
+# FAKE EXTERNAL DEPENDENCIES
+# Mock external modules before any caterva2_agent imports to avoid network/API deps.
+# ---------------------------------------------------------------------------
+
+# Fake caterva2 module — must be registered BEFORE importing any tools
+fake_caterva2 = types.ModuleType("caterva2")
+
+
+class _FakeClient:
+    """Stub Client for testing without network."""
+    def __init__(self, _url: str):
+        self.url = _url
+
+
+class _FakeDataset:
+    """Stub Dataset class for type annotation in tools modules."""
+    pass
+
+
+fake_caterva2.Client = _FakeClient
+fake_caterva2.Dataset = _FakeDataset
+sys.modules["caterva2"] = fake_caterva2
+
+
+# ---------------------------------------------------------------------------
+# FAKE CONFIG MODULE
+# Provide fake config values so tests don't need real API keys or .env file.
+# This fake is used when importing from caterva2_agent.config
+# ---------------------------------------------------------------------------
+
+# Create a fake prompts module first (config depends on it)
+fake_prompts = types.ModuleType("caterva2_agent.prompts")
+fake_prompts.SYSTEM_PROMPT = "test system prompt"
+sys.modules["caterva2_agent.prompts"] = fake_prompts
+
+# Create fake config module
+fake_config = types.ModuleType("caterva2_agent.config")
 fake_config.CATERVA2_URLBASE = "http://test-caterva2.local"
 fake_config.MODEL_NAME = "test-model"
 fake_config.SYSTEM_PROMPT = "test system prompt"
@@ -24,23 +63,19 @@ fake_config.client = types.SimpleNamespace(
         completions=types.SimpleNamespace(create=lambda **kwargs: None)
     )
 )
+sys.modules["caterva2_agent.config"] = fake_config
+
+# Also provide bare 'config' module for backwards compatibility with existing tests
 sys.modules["config"] = fake_config
 
 
-# Provide a minimal fake `caterva2` module to avoid importing network dependencies in unit tests.
-fake_caterva2 = types.ModuleType("caterva2")
+# ---------------------------------------------------------------------------
+# IMPORT HELPERS
+# After fakes are registered, tests can safely import from caterva2_agent.tools
+# ---------------------------------------------------------------------------
 
+def get_tools_module():
+    """Import and return the tools package after fakes are set up."""
+    from caterva2_agent import tools
+    return tools
 
-class _FakeClient:
-    def __init__(self, _url: str):
-        self.url = _url
-
-
-class _FakeDataset:
-    """Stub Dataset class for type annotation in tools.py."""
-    pass
-
-
-fake_caterva2.Client = _FakeClient
-fake_caterva2.Dataset = _FakeDataset
-sys.modules["caterva2"] = fake_caterva2
