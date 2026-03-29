@@ -3,9 +3,7 @@ Data access tools for retrieving values from Caterva2 datasets.
 
 Tools in this module:
 - get_slice: Retrieve a portion of dataset values with safety limits
-
-Future tools planned:
-- where_filter: Conditional selection using where()
+- where_filter: Conditional selection using where() — filter data based on conditions
 """
 
 from typing import Dict, Any
@@ -62,6 +60,73 @@ DATA_ACCESS_TOOLS = [
                     }
                 },
                 "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "where_filter",
+            "description": (
+                "Filter dataset values based on a condition (like SQL WHERE). "
+                "Returns value_if_true where condition is met, value_if_false otherwise. "
+                "Example use case: for elevation data, filter peaks above 3000m by returning "
+                "the actual elevation where > 3000, and 0 (or NaN) elsewhere. "
+                "This is useful for masking, thresholding, or highlighting specific data regions. "
+                "SAFETY: Limited to 10,000 elements maximum — use slices for larger datasets."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Full path to the dataset including the root name. "
+                            "Example: '@public/examples/ds-1d.b2nd'"
+                        )
+                    },
+                    "operator": {
+                        "type": "string",
+                        "enum": [">", ">=", "<", "<=", "==", "!="],
+                        "description": (
+                            "Comparison operator for the condition. "
+                            "'>': greater than, '>=': greater or equal, "
+                            "'<': less than, '<=': less or equal, "
+                            "'==': equal to, '!=': not equal to."
+                        )
+                    },
+                    "threshold": {
+                        "type": "number",
+                        "description": (
+                            "The threshold value to compare against. "
+                            "Example: 3000 for 'elevation > 3000'."
+                        )
+                    },
+                    "value_if_true": {
+                        "type": "number",
+                        "description": (
+                            "Value to return where condition is True. "
+                            "Use special value 'data' (as string) to return the original data value. "
+                            "Default: returns the original data value."
+                        )
+                    },
+                    "value_if_false": {
+                        "type": "number",
+                        "description": (
+                            "Value to return where condition is False. "
+                            "Common choices: 0, NaN (use null), or a sentinel value. "
+                            "Default: 0."
+                        )
+                    },
+                    "slices": {
+                        "type": "string",
+                        "description": (
+                            "Optional slice specification to limit the filter to a region. "
+                            "Same syntax as get_slice. Highly recommended for large datasets."
+                        )
+                    }
+                },
+                "required": ["path", "operator", "threshold"]
             }
         }
     }
@@ -301,3 +366,158 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
     except Exception as e:
         print(f"   ✗ Failed: {e}")
         return {"error": f"Failed to get slice from '{path}': {e}"}
+
+
+# ---------------------------------------------------------------------------
+# SUPPORTED OPERATORS FOR where_filter
+# Maps string operators to Python comparison functions
+# ---------------------------------------------------------------------------
+
+COMPARISON_OPERATORS = {
+    ">": lambda data, threshold: data > threshold,
+    ">=": lambda data, threshold: data >= threshold,
+    "<": lambda data, threshold: data < threshold,
+    "<=": lambda data, threshold: data <= threshold,
+    "==": lambda data, threshold: data == threshold,
+    "!=": lambda data, threshold: data != threshold,
+}
+
+
+def where_filter(
+    path: str,
+    operator: str,
+    threshold: float,
+    value_if_true: float | None = None,
+    value_if_false: float | None = None,
+    slices: str | None = None
+) -> Dict[str, Any]:
+    """
+    Filter dataset values based on a condition.
+    
+    Applies a comparison (e.g., > 3000) to the dataset and returns:
+    - value_if_true where the condition is met
+    - value_if_false where the condition is not met
+    
+    This is implemented using numpy's where function on the fetched slice.
+    The tool is stateless — it fetches data fresh each call. If you previously
+    used get_slice on a region, pass the same slice here to filter that region.
+    
+    Use cases:
+    - Thresholding: elevation > 3000 → show peaks, mask valleys
+    - Masking: set out-of-range values to NaN or 0
+    - Binary classification: value > threshold → 1, else 0
+    
+    Args:
+        path: Full path to dataset (e.g. '@public/examples/ds-1d.b2nd')
+        operator: Comparison operator (>, >=, <, <=, ==, !=)
+        threshold: Value to compare against
+        value_if_true: Value where condition is True (default: original data)
+        value_if_false: Value where condition is False (default: 0)
+        slices: Optional slice to limit the region (recommended for large datasets)
+    
+    Returns:
+        Dict with filtered data, condition info, and summary, or 'error' on failure.
+    """
+    # Validate operator
+    if operator not in COMPARISON_OPERATORS:
+        return {
+            "error": f"Invalid operator: '{operator}'. "
+                     f"Valid options: {list(COMPARISON_OPERATORS.keys())}"
+        }
+    
+    print(f"→ Filtering dataset: '{path}'")
+    print(f"   Condition: data {operator} {threshold}")
+    print(f"   Values: if_true={value_if_true or 'data'}, if_false={value_if_false or 0}")
+    if slices:
+        print(f"   Slice: {slices}")
+    
+    try:
+        dataset = _get_dataset(path)
+        shape = dataset.shape
+        
+        # Determine slice to apply (for size safety)
+        if slices is None:
+            slice_tuple = _default_slice_for_shape(shape, MAX_SLICE_ELEMENTS)
+            slice_str_used = "(default — first elements)"
+        else:
+            slice_tuple = _parse_slice_string(slices, shape)
+            slice_str_used = slices
+        
+        # Estimate size and enforce limit
+        estimated_size = _compute_slice_size(slice_tuple, shape)
+        if estimated_size > MAX_SLICE_ELEMENTS:
+            return {
+                "error": f"Requested region would return ~{estimated_size:,} elements, "
+                         f"exceeding limit of {MAX_SLICE_ELEMENTS:,}. "
+                         f"Please specify a smaller slice.",
+                "shape": list(shape),
+                "requested_slice": slice_str_used
+            }
+        
+        print(f"   Estimated elements: {estimated_size}")
+        
+        # Step 1: Get the data slice as numpy array
+        data_slice = dataset[slice_tuple]
+        
+        # Step 2: Build the boolean condition
+        compare_fn = COMPARISON_OPERATORS[operator]
+        condition = compare_fn(data_slice, threshold)
+        
+        # Step 3: Determine replacement values
+        # If value_if_true is None, use the original data (passthrough)
+        # If value_if_false is None, default to 0
+        import numpy as np
+        
+        v_true = data_slice if value_if_true is None else value_if_true
+        v_false = 0 if value_if_false is None else value_if_false
+        
+        # Step 4: Apply where condition
+        # np.where(condition, x, y) returns x where True, y where False
+        result_data = np.where(condition, v_true, v_false)
+        
+        # Convert to JSON-safe format
+        result_json = _to_json_safe(result_data)
+        
+        # Compute summary statistics
+        summary = _compute_summary(result_data)
+        
+        # Count how many elements matched the condition
+        num_matched = int(np.sum(condition))
+        num_total = int(condition.size)
+        match_percentage = (num_matched / num_total * 100) if num_total > 0 else 0
+        
+        result = {
+            "path": path,
+            "dataset_shape": list(shape),
+            "dtype": str(dataset.dtype),
+            "condition": f"data {operator} {threshold}",
+            "slice_applied": slice_str_used,
+            "result_shape": list(result_data.shape),
+            "value_if_true": "original_data" if value_if_true is None else value_if_true,
+            "value_if_false": v_false,
+            "match_summary": {
+                "matched": num_matched,
+                "total": num_total,
+                "percentage": round(match_percentage, 2)
+            },
+            "summary": summary,
+            "data": result_json
+        }
+        
+        # Hint for LLM on how to present results
+        if summary["num_elements"] > SUMMARY_THRESHOLD:
+            result["_hint"] = (
+                f"Large result ({summary['num_elements']} elements). "
+                f"{num_matched} values ({match_percentage:.1f}%) matched the condition. "
+                "Present the summary to the user and offer to show full data if requested."
+            )
+        
+        return result
+    
+    except ValueError as e:
+        # Slice parsing errors
+        print(f"   ✗ Invalid slice: {e}")
+        return {"error": f"Invalid slice specification: {e}"}
+    except Exception as e:
+        print(f"   ✗ Failed: {e}")
+        return {"error": f"Failed to filter '{path}': {e}"}
