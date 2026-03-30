@@ -19,15 +19,16 @@ from typing import Dict, Any
 from .browsing import BROWSING_TOOLS, list_roots, list_datasets, get_dataset_info
 from .analysis import ANALYSIS_TOOLS, get_dataset_stats
 from .data_access import DATA_ACCESS_TOOLS, get_slice, where_filter
+from .visualization import VISUALIZATION_TOOLS, visualize_dataset
 
 
 # ---------------------------------------------------------------------------
 # COMBINED TOOL SCHEMAS
 # Sent to the LLM so it knows what tools exist.
-# Order: browsing → analysis → data_access (discovery before manipulation)
+# Order: browsing → analysis → data_access → visualization (discovery before manipulation)
 # ---------------------------------------------------------------------------
 
-TOOLS = BROWSING_TOOLS + ANALYSIS_TOOLS + DATA_ACCESS_TOOLS
+TOOLS = BROWSING_TOOLS + ANALYSIS_TOOLS + DATA_ACCESS_TOOLS + VISUALIZATION_TOOLS
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +48,9 @@ TOOL_MAP = {
     # Data access tools
     "get_slice": get_slice,
     "where_filter": where_filter,
+    
+    # Visualization tools
+    "visualize_dataset": visualize_dataset,
 }
 
 
