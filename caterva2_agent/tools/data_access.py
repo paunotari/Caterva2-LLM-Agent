@@ -1,14 +1,18 @@
 """
-Data access tools for retrieving values from Caterva2 datasets.
+Data access tools for retrieving values from datasets.
 
 Tools in this module:
 - get_slice: Retrieve a portion of dataset values with safety limits
 - where_filter: Conditional selection using where() — filter data based on conditions
+
+Works with both:
+- Server datasets (path starts with '@')
+- Local variables (referenced by name)
 """
 
 from typing import Dict, Any
 
-from ._base import _get_dataset, _to_json_safe, register_fetched_object
+from ._base import resolve_data, _to_json_safe, register_fetched_object
 
 
 # ---------------------------------------------------------------------------
@@ -33,10 +37,11 @@ DATA_ACCESS_TOOLS = [
         "function": {
             "name": "get_slice",
             "description": (
-                "Retrieve a slice of data values from a dataset. "
+                "Retrieve a slice of data values from a dataset or local variable. "
                 "Use this when the user wants to see actual data, not just statistics. "
                 "SAFETY: Limited to 10,000 elements maximum to avoid memory issues. "
-                "For large datasets, use slicing to select a specific region of interest."
+                "For large datasets, use slicing to select a specific region of interest. "
+                "Works with both server datasets (@path) and local variables (variable_name)."
             ),
             "parameters": {
                 "type": "object",
@@ -44,8 +49,9 @@ DATA_ACCESS_TOOLS = [
                     "path": {
                         "type": "string",
                         "description": (
-                            "Full path to the dataset including the root name. "
-                            "Example: '@public/examples/ds-1d.b2nd'"
+                            "Server dataset path (e.g. '@public/examples/ds-1d.b2nd') "
+                            "OR local variable name (e.g. 'my_data'). "
+                            "Use '@' prefix for server datasets, plain name for local variables."
                         )
                     },
                     "slices": {
@@ -68,12 +74,13 @@ DATA_ACCESS_TOOLS = [
         "function": {
             "name": "where_filter",
             "description": (
-                "Filter dataset values based on a condition (like SQL WHERE). "
+                "Filter dataset or local variable values based on a condition (like SQL WHERE). "
                 "Returns value_if_true where condition is met, value_if_false otherwise. "
                 "Example use case: for elevation data, filter peaks above 3000m by returning "
                 "the actual elevation where > 3000, and 0 (or NaN) elsewhere. "
                 "This is useful for masking, thresholding, or highlighting specific data regions. "
-                "SAFETY: Limited to 10,000 elements maximum — use slices for larger datasets."
+                "SAFETY: Limited to 10,000 elements maximum — use slices for larger datasets. "
+                "Works with both server datasets (@path) and local variables (variable_name)."
             ),
             "parameters": {
                 "type": "object",
@@ -81,8 +88,9 @@ DATA_ACCESS_TOOLS = [
                     "path": {
                         "type": "string",
                         "description": (
-                            "Full path to the dataset including the root name. "
-                            "Example: '@public/examples/ds-1d.b2nd'"
+                            "Server dataset path (e.g. '@public/examples/ds-1d.b2nd') "
+                            "OR local variable name (e.g. 'my_data'). "
+                            "Use '@' prefix for server datasets, plain name for local variables."
                         )
                     },
                     "operator": {
@@ -288,7 +296,7 @@ def _compute_summary(data) -> Dict[str, Any]:
 
 def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
     """
-    Retrieve a slice of data from a dataset.
+    Retrieve a slice of data from a dataset or local variable.
     
     Parses Python-style slice syntax and enforces a maximum element limit
     to protect the LLM context window from huge data dumps.
@@ -298,18 +306,22 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
     show full data on request.
     
     Args:
-        path: Full path to dataset (e.g. '@public/examples/ds-1d.b2nd')
+        path: Server dataset path (e.g. '@public/examples/ds-1d.b2nd')
+              OR local variable name (e.g. 'my_data')
         slices: Python slice syntax (e.g. '0:100', '0:5, 0:3')
     
     Returns:
         Dict with slice metadata, summary, and data values, or 'error' on failure.
     """
-    print(f"→ Getting slice from dataset: '{path}'")
+    is_local = not path.startswith("@")
+    source_type = "local variable" if is_local else "server dataset"
+    
+    print(f"→ Getting slice from {source_type}: '{path}'")
     print(f"   Requested slice: {slices or '(default)'}")
     
     try:
-        dataset = _get_dataset(path)
-        shape = dataset.shape
+        resolved = resolve_data(path)
+        shape = resolved.shape
         
         # Parse or generate slice specification
         if slices is None:
@@ -333,20 +345,23 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
         print(f"   Slice tuple: {slice_tuple}")
         print(f"   Estimated elements: {estimated_size}")
         
-        # Fetch the data — __getitem__ returns numpy array
-        data = dataset[slice_tuple]
+        # Fetch the data
+        data = resolved[slice_tuple]
         data_json = _to_json_safe(data)
         
         # Register for notebook injection (user can access as a variable)
-        register_fetched_object(path, data)
+        # Only register if this is from server (local vars are already in namespace)
+        if not is_local:
+            register_fetched_object(path, data)
         
         # Pre-compute summary for LLM presentation
         summary = _compute_summary(data)
         
         result = {
             "path": path,
+            "source": source_type,
             "dataset_shape": list(shape),
-            "dtype": str(dataset.dtype),
+            "dtype": str(resolved.dtype),
             "slice": slice_str_used,
             "result_shape": list(data.shape) if hasattr(data, 'shape') else [],
             "summary": summary,
@@ -363,9 +378,9 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
         return result
     
     except ValueError as e:
-        # Slice parsing errors
-        print(f"   ✗ Invalid slice: {e}")
-        return {"error": f"Invalid slice specification: {e}"}
+        # Slice parsing errors or variable not found
+        print(f"   ✗ Error: {e}")
+        return {"error": str(e)}
     except Exception as e:
         print(f"   ✗ Failed: {e}")
         return {"error": f"Failed to get slice from '{path}': {e}"}
@@ -395,9 +410,9 @@ def where_filter(
     slices: str | None = None
 ) -> Dict[str, Any]:
     """
-    Filter dataset values based on a condition.
+    Filter dataset or local variable values based on a condition.
     
-    Applies a comparison (e.g., > 3000) to the dataset and returns:
+    Applies a comparison (e.g., > 3000) to the data and returns:
     - value_if_true where the condition is met
     - value_if_false where the condition is not met
     
@@ -411,7 +426,8 @@ def where_filter(
     - Binary classification: value > threshold → 1, else 0
     
     Args:
-        path: Full path to dataset (e.g. '@public/examples/ds-1d.b2nd')
+        path: Server dataset path (e.g. '@public/examples/ds-1d.b2nd')
+              OR local variable name (e.g. 'my_data')
         operator: Comparison operator (>, >=, <, <=, ==, !=)
         threshold: Value to compare against
         value_if_true: Value where condition is True (default: original data)
@@ -428,15 +444,18 @@ def where_filter(
                      f"Valid options: {list(COMPARISON_OPERATORS.keys())}"
         }
     
-    print(f"→ Filtering dataset: '{path}'")
+    is_local = not path.startswith("@")
+    source_type = "local variable" if is_local else "server dataset"
+    
+    print(f"→ Filtering {source_type}: '{path}'")
     print(f"   Condition: data {operator} {threshold}")
     print(f"   Values: if_true={value_if_true or 'data'}, if_false={value_if_false or 0}")
     if slices:
         print(f"   Slice: {slices}")
     
     try:
-        dataset = _get_dataset(path)
-        shape = dataset.shape
+        resolved = resolve_data(path)
+        shape = resolved.shape
         
         # Determine slice to apply (for size safety)
         if slices is None:
@@ -460,7 +479,7 @@ def where_filter(
         print(f"   Estimated elements: {estimated_size}")
         
         # Step 1: Get the data slice as numpy array
-        data_slice = dataset[slice_tuple]
+        data_slice = resolved[slice_tuple]
         
         # Step 2: Build the boolean condition
         compare_fn = COMPARISON_OPERATORS[operator]
@@ -480,8 +499,10 @@ def where_filter(
         
         # Register for notebook injection (user can access as a variable)
         # Use a descriptive path that includes the filter condition
-        filter_path = f"{path}[{operator}{threshold}]"
-        register_fetched_object(filter_path, result_data)
+        # Only register if this is from server (local vars are already in namespace)
+        if not is_local:
+            filter_path = f"{path}[{operator}{threshold}]"
+            register_fetched_object(filter_path, result_data)
         
         # Convert to JSON-safe format
         result_json = _to_json_safe(result_data)
@@ -496,8 +517,9 @@ def where_filter(
         
         result = {
             "path": path,
+            "source": source_type,
             "dataset_shape": list(shape),
-            "dtype": str(dataset.dtype),
+            "dtype": str(resolved.dtype),
             "condition": f"data {operator} {threshold}",
             "slice_applied": slice_str_used,
             "result_shape": list(result_data.shape),
@@ -523,9 +545,9 @@ def where_filter(
         return result
     
     except ValueError as e:
-        # Slice parsing errors
-        print(f"   ✗ Invalid slice: {e}")
-        return {"error": f"Invalid slice specification: {e}"}
+        # Slice parsing errors or variable not found
+        print(f"   ✗ Error: {e}")
+        return {"error": str(e)}
     except Exception as e:
         print(f"   ✗ Failed: {e}")
         return {"error": f"Failed to filter '{path}': {e}"}

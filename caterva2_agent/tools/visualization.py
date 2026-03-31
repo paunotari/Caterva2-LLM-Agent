@@ -1,5 +1,5 @@
 """
-Visualization tools for rendering Caterva2 datasets as interactive Plotly plots.
+Visualization tools for rendering datasets as interactive Plotly plots.
 
 Tools in this module:
 - visualize_dataset: Auto-detect dimensionality and render appropriate plot
@@ -11,6 +11,10 @@ Supported visualizations:
 - ≥4D: Error with guidance to slice down
 
 Output: Displays inline in Jupyter notebooks via fig.show()
+
+Works with both:
+- Server datasets (path starts with '@')
+- Local variables (referenced by name)
 """
 
 from typing import Dict, Any
@@ -19,7 +23,7 @@ import numpy as np
 import plotly.graph_objects as go
 from scipy.ndimage import zoom
 
-from ._base import _get_dataset, _to_json_safe
+from ._base import resolve_data, _to_json_safe
 from .data_access import _parse_slice_string
 
 
@@ -48,12 +52,13 @@ VISUALIZATION_TOOLS = [
         "function": {
             "name": "visualize_dataset",
             "description": (
-                "Visualize a dataset as an interactive Plotly plot. "
+                "Visualize a dataset or local variable as an interactive Plotly plot. "
                 "Auto-detects dimensionality: 1D → line plot, 2D → heatmap, 3D → volume rendering. "
                 "For 3D tomographies, renders a volume with transparency to show internal structures. "
                 "Large datasets are automatically downsampled for interactive performance. "
                 "For ≥4D datasets, you MUST provide slices to reduce to ≤3D. "
-                "Displays inline in Jupyter notebooks."
+                "Displays inline in Jupyter notebooks. "
+                "Works with both server datasets (@path) and local variables (variable_name)."
             ),
             "parameters": {
                 "type": "object",
@@ -61,8 +66,9 @@ VISUALIZATION_TOOLS = [
                     "path": {
                         "type": "string",
                         "description": (
-                            "Full path to the dataset including the root name. "
-                            "Example: '@public/examples/kevlar-tomo.b2nd'"
+                            "Server dataset path (e.g. '@public/examples/kevlar-tomo.b2nd') "
+                            "OR local variable name (e.g. 'my_data'). "
+                            "Use '@' prefix for server datasets, plain name for local variables."
                         )
                     },
                     "slices": {
@@ -101,7 +107,7 @@ VISUALIZATION_TOOLS = [
                         "type": "string",
                         "description": (
                             "Optional custom title for the plot. "
-                            "If not provided, uses the dataset path."
+                            "If not provided, uses the dataset path or variable name."
                         )
                     }
                 },
@@ -282,7 +288,7 @@ def visualize_dataset(
     title: str | None = None
 ) -> Dict[str, Any]:
     """
-    Visualize a dataset as an interactive Plotly plot.
+    Visualize a dataset or local variable as an interactive Plotly plot.
     
     Auto-detects dimensionality and renders:
     - 1D: Line plot
@@ -294,7 +300,8 @@ def visualize_dataset(
     The plot displays inline in Jupyter notebooks.
     
     Args:
-        path: Full path to dataset (e.g. '@public/examples/kevlar-tomo.b2nd')
+        path: Server dataset path (e.g. '@public/examples/kevlar-tomo.b2nd')
+              OR local variable name (e.g. 'my_data')
         slices: Optional slice specification to select a region
         colorscale: Colorscale name (default: 'Viridis')
         opacity: Volume opacity 0-1 (default: 0.3)
@@ -309,19 +316,22 @@ def visualize_dataset(
     opacity = opacity if opacity is not None else DEFAULT_OPACITY
     max_size = max_size or DEFAULT_MAX_SIZE
     
-    print(f"→ Visualizing dataset: '{path}'")
+    is_local = not path.startswith("@")
+    source_type = "local variable" if is_local else "server dataset"
+    
+    print(f"→ Visualizing {source_type}: '{path}'")
     
     try:
-        dataset = _get_dataset(path)
-        shape = dataset.shape
+        resolved = resolve_data(path)
+        shape = resolved.shape
         ndim = len(shape)
         
-        print(f"   Shape: {shape}, dtype: {dataset.dtype}")
+        print(f"   Shape: {shape}, dtype: {resolved.dtype}")
         
         # --- Apply slices if provided ---
         if slices:
             slice_tuple = _parse_slice_string(slices, shape)
-            data = dataset[slice_tuple]
+            data = resolved[slice_tuple]
             print(f"   Applied slice: {slices} → shape {data.shape}")
         else:
             # For very large datasets, we need to be careful
@@ -329,13 +339,13 @@ def visualize_dataset(
             if total_elements > max_size * 10:
                 # Dataset is way too large to fetch entirely — require slices
                 return {
-                    "error": f"Dataset has {total_elements:,} elements — too large to visualize directly. "
+                    "error": f"Data has {total_elements:,} elements — too large to visualize directly. "
                              f"Please provide 'slices' to select a smaller region.",
                     "shape": list(shape),
                     "suggestion": f"Try slices like '0:{min(100, shape[0])}' for 1D, "
                                   f"or '0, :, :' for a 2D slice of a 3D array."
                 }
-            data = dataset[:]
+            data = resolved[:]
         
         # Convert to numpy if needed
         data = np.asarray(data)
@@ -355,7 +365,7 @@ def visualize_dataset(
             }
         
         # --- Generate title ---
-        plot_title = title or f"Dataset: {path}"
+        plot_title = title or f"{'Variable' if is_local else 'Dataset'}: {path}"
         if slices:
             plot_title += f" [{slices}]"
         
@@ -406,6 +416,7 @@ def visualize_dataset(
             "status": "success",
             "visualization_type": viz_type,
             "path": path,
+            "source": source_type,
             "original_shape": list(original_shape),
             "rendered_shape": list(data.shape),
             "colorscale": colorscale,
@@ -429,8 +440,8 @@ def visualize_dataset(
         return result
     
     except ValueError as e:
-        print(f"   ✗ Invalid slice: {e}")
-        return {"error": f"Invalid slice specification: {e}"}
+        print(f"   ✗ Error: {e}")
+        return {"error": str(e)}
     except Exception as e:
         print(f"   ✗ Failed: {e}")
         return {"error": f"Failed to visualize '{path}': {e}"}

@@ -49,6 +49,7 @@ def _ensure_local_import_bootstrap() -> None:
 
 _ensure_local_import_bootstrap()
 from caterva2_agent.tools import data_access
+from caterva2_agent.tools._base import ResolvedData
 
 
 class _FakeDataset1D:
@@ -88,6 +89,11 @@ class _FakeElevationDataset:
         return self._data[key]
 
 
+def _make_resolved(fake_dataset):
+    """Helper to create a ResolvedData wrapping a fake dataset."""
+    return ResolvedData(fake_dataset, source='server', name='@test/data.b2nd')
+
+
 # ---------------------------------------------------------------------------
 # CORE FUNCTIONALITY TESTS
 # ---------------------------------------------------------------------------
@@ -95,7 +101,7 @@ class _FakeElevationDataset:
 def test_where_filter_greater_than(monkeypatch) -> None:
     # What this tests: basic > operator works correctly.
     # Why important: most common filtering use case.
-    monkeypatch.setattr(data_access, "_get_dataset", lambda _path: _FakeDataset1D())
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDataset1D()))
     result = data_access.where_filter(
         path="@public/example.b2nd",
         operator=">",
@@ -119,7 +125,7 @@ def test_where_filter_greater_than(monkeypatch) -> None:
 def test_where_filter_less_than_or_equal(monkeypatch) -> None:
     # What this tests: <= operator for range filtering.
     # Why important: validates all comparison operators work.
-    monkeypatch.setattr(data_access, "_get_dataset", lambda _path: _FakeDataset1D())
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDataset1D()))
     result = data_access.where_filter(
         path="@public/example.b2nd",
         operator="<=",
@@ -135,7 +141,7 @@ def test_where_filter_less_than_or_equal(monkeypatch) -> None:
 def test_where_filter_custom_replacement_values(monkeypatch) -> None:
     # What this tests: custom value_if_true and value_if_false work.
     # Why important: enables binary masking (1/0) and other transformations.
-    monkeypatch.setattr(data_access, "_get_dataset", lambda _path: _FakeDataset1D())
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDataset1D()))
     result = data_access.where_filter(
         path="@public/example.b2nd",
         operator=">",
@@ -160,7 +166,7 @@ def test_where_filter_custom_replacement_values(monkeypatch) -> None:
 def test_where_filter_elevation_use_case(monkeypatch) -> None:
     # What this tests: realistic elevation filtering scenario.
     # Why important: validates the mountain peaks example from requirements.
-    monkeypatch.setattr(data_access, "_get_dataset", lambda _path: _FakeElevationDataset())
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeElevationDataset()))
     result = data_access.where_filter(
         path="@public/terrain.b2nd",
         operator=">",
@@ -183,7 +189,7 @@ def test_where_filter_elevation_use_case(monkeypatch) -> None:
 def test_where_filter_2d_dataset(monkeypatch) -> None:
     # What this tests: filtering works on multi-dimensional data.
     # Why important: scientific datasets are often multi-dimensional.
-    monkeypatch.setattr(data_access, "_get_dataset", lambda _path: _FakeDataset2D())
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDataset2D()))
     result = data_access.where_filter(
         path="@public/example.b2nd",
         operator=">=",
@@ -207,7 +213,7 @@ def test_where_filter_2d_dataset(monkeypatch) -> None:
 def test_where_filter_invalid_operator(monkeypatch) -> None:
     # What this tests: invalid operator returns clear error.
     # Why important: graceful handling of bad LLM input.
-    monkeypatch.setattr(data_access, "_get_dataset", lambda _path: _FakeDataset1D())
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDataset1D()))
     result = data_access.where_filter(
         path="@public/example.b2nd",
         operator=">>>",  # Invalid
@@ -229,7 +235,7 @@ def test_where_filter_oversized_request_rejected(monkeypatch) -> None:
         def __getitem__(self, key):
             raise AssertionError("Should not fetch data")
     
-    monkeypatch.setattr(data_access, "_get_dataset", lambda _path: _HugeDataset())
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_HugeDataset()))
     result = data_access.where_filter(
         path="@public/huge.b2nd",
         operator=">",
@@ -244,7 +250,7 @@ def test_where_filter_oversized_request_rejected(monkeypatch) -> None:
 def test_where_filter_equal_operator(monkeypatch) -> None:
     # What this tests: == operator for exact value matching.
     # Why important: useful for finding specific values.
-    monkeypatch.setattr(data_access, "_get_dataset", lambda _path: _FakeDataset1D())
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDataset1D()))
     result = data_access.where_filter(
         path="@public/example.b2nd",
         operator="==",
@@ -267,7 +273,7 @@ def test_where_filter_equal_operator(monkeypatch) -> None:
 def test_where_filter_not_equal_operator(monkeypatch) -> None:
     # What this tests: != operator for exclusion filtering.
     # Why important: useful for masking specific values.
-    monkeypatch.setattr(data_access, "_get_dataset", lambda _path: _FakeDataset1D())
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDataset1D()))
     result = data_access.where_filter(
         path="@public/example.b2nd",
         operator="!=",
@@ -287,7 +293,7 @@ def test_where_filter_not_equal_operator(monkeypatch) -> None:
 def test_where_filter_output_contract(monkeypatch) -> None:
     # What this tests: result contains all expected fields.
     # Why important: contract for agent to parse results.
-    monkeypatch.setattr(data_access, "_get_dataset", lambda _path: _FakeDataset1D())
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDataset1D()))
     result = data_access.where_filter(
         path="@public/example.b2nd",
         operator=">",
@@ -328,7 +334,7 @@ def test_where_filter_large_result_includes_hint(monkeypatch) -> None:
         def __getitem__(self, key):
             return self._data[key]
     
-    monkeypatch.setattr(data_access, "_get_dataset", lambda _path: _LargerDataset())
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_LargerDataset()))
     result = data_access.where_filter(
         path="@public/example.b2nd",
         operator=">",
