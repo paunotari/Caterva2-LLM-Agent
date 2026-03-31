@@ -5,6 +5,7 @@ This module provides:
 - Caterva2 client management (singleton pattern)
 - Dataset retrieval helper
 - JSON serialization utilities
+- Object registry for notebook integration
 
 These are shared across browsing, analysis, and data_access tools.
 """
@@ -13,7 +14,60 @@ from typing import Any
 
 import caterva2 as cat2
 
-from config import CATERVA2_URLBASE
+from caterva2_agent.config import CATERVA2_URLBASE
+
+
+# ---------------------------------------------------------------------------
+# OBJECT REGISTRY FOR NOTEBOOK INTEGRATION
+# ---------------------------------------------------------------------------
+# When tools fetch data (get_slice, where_filter), they register results here.
+# The notebook.py module reads this registry to inject variables into the
+# user's namespace. This decouples tool execution from notebook integration.
+
+# Format: {"@public/path/to/dataset.b2nd": <numpy array>, ...}
+# Keys are full dataset paths for traceability.
+_fetched_objects: dict[str, Any] = {}
+
+
+def register_fetched_object(path: str, data: Any) -> None:
+    """
+    Register a fetched object for later injection into notebook namespace.
+    
+    Called by tools that retrieve data (get_slice, where_filter).
+    The notebook module reads this registry after agent.run() completes.
+    
+    Args:
+        path: Full dataset path (e.g. '@public/examples/ds-1d.b2nd')
+        data: The fetched data (typically a numpy array)
+    """
+    _fetched_objects[path] = data
+
+
+def get_fetched_objects() -> dict[str, Any]:
+    """
+    Get all fetched objects (for notebook injection).
+    
+    Returns:
+        Dict mapping paths to fetched data
+    """
+    return _fetched_objects.copy()
+
+
+def clear_fetched_objects() -> None:
+    """Clear the fetched objects registry."""
+    _fetched_objects.clear()
+
+
+def pop_fetched_objects() -> dict[str, Any]:
+    """
+    Get and clear all fetched objects (atomic operation for injection).
+    
+    Returns:
+        Dict mapping paths to fetched data
+    """
+    result = _fetched_objects.copy()
+    _fetched_objects.clear()
+    return result
 
 
 # ---------------------------------------------------------------------------

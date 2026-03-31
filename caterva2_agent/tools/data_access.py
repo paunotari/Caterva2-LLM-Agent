@@ -8,7 +8,7 @@ Tools in this module:
 
 from typing import Dict, Any
 
-from ._base import _get_dataset, _to_json_safe
+from ._base import _get_dataset, _to_json_safe, register_fetched_object
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +337,9 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
         data = dataset[slice_tuple]
         data_json = _to_json_safe(data)
         
+        # Register for notebook injection (user can access as a variable)
+        register_fetched_object(path, data)
+        
         # Pre-compute summary for LLM presentation
         summary = _compute_summary(data)
         
@@ -474,6 +477,11 @@ def where_filter(
         # Step 4: Apply where condition
         # np.where(condition, x, y) returns x where True, y where False
         result_data = np.where(condition, v_true, v_false)
+        
+        # Register for notebook injection (user can access as a variable)
+        # Use a descriptive path that includes the filter condition
+        filter_path = f"{path}[{operator}{threshold}]"
+        register_fetched_object(filter_path, result_data)
         
         # Convert to JSON-safe format
         result_json = _to_json_safe(result_data)

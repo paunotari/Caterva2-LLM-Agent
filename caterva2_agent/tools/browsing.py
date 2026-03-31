@@ -10,7 +10,7 @@ Tools in this module:
 from typing import Dict, Any
 
 from ._base import _get_client
-from config import CATERVA2_URLBASE
+from caterva2_agent.config import CATERVA2_URLBASE
 
 
 # ---------------------------------------------------------------------------
