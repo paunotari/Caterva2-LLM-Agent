@@ -27,7 +27,7 @@ import re
 from typing import Any
 
 from IPython import get_ipython
-from IPython.display import display, Markdown, HTML
+from IPython.display import display, Markdown
 
 from caterva2_agent.agent import Agent
 from caterva2_agent.tools._base import pop_fetched_objects, set_notebook_namespace
@@ -48,7 +48,7 @@ _agent_objects: dict[str, Any] = {}
 MAX_INPUT_CHARS = 5000
 
 # Pattern for {variable} references in chat messages
-VARIABLE_REFERENCE_PATTERN = re.compile(r'\{(\w+)\}')
+VARIABLE_REFERENCE_PATTERN = re.compile(r'\{(\w+)}')
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +304,7 @@ def chat(message: str) -> None:
     1. Process your message using its tools
     2. Fetch any needed data from the Caterva2 server
     3. Inject fetched datasets into the notebook namespace
-    4. Display the response with markdown formatting
+    4. Display the response with Markdown formatting
     
     Variable References:
         Use {variable_name} to reference a local variable.
@@ -370,7 +370,7 @@ def chat(message: str) -> None:
         if injected_names:
             print(f"📦 Data available as: {', '.join(f'`{n}`' for n in injected_names)}")
         
-        # Display response with markdown formatting in Jupyter
+        # Display response with Markdown formatting in Jupyter
         _display_response(response)
         
         return None  # Response already displayed; return None to avoid duplicate
@@ -474,7 +474,7 @@ def variables() -> None:
 
 def _display_response(response: str) -> None:
     """
-    Display an agent response with markdown rendering.
+    Display an agent response with Markdown rendering.
     
     Falls back to plain print if not in Jupyter.
     """

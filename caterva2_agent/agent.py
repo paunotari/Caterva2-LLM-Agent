@@ -107,7 +107,7 @@ class Agent:
         return None
 
     def _get_trimmed_history(self):
-        """Return system prompt + last max_history_messages messages (for LLM context)."""
+        """Return system prompt + last max_history_messages, heuristic, there's better sol like summarization"""
         if not self.messages:
             return []
         system = self.messages[0]
@@ -118,7 +118,7 @@ class Agent:
         """
         Process a user message and return the agent's final response.
 
-        Runs the agent loop: appends user message → calls LLM → executes any
+        Runs the agent ReAct loop: appends user message → calls LLM → executes any
         tool calls → repeats until LLM gives a final answer. ReAct Pattern
 
         Args:
