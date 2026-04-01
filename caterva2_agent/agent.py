@@ -7,9 +7,6 @@ The loop works as follows:
 3. If the LLM requests tool calls → execute them, append results, go to step 2
 4. If the LLM gives a final answer (no tool calls) → return it to the user
 
-This is the same pattern as the toy calculator agent, extended with:
-- A Caterva2-specific system prompt
-- Dataset exploration tools (browsing, analysis, data_access)
 """
 
 import json
@@ -18,6 +15,7 @@ import random
 import time
 from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import RotatingFileHandler
+from typing import Any
 import os
 
 from caterva2_agent.config import client, MODEL_NAME, SYSTEM_PROMPT
@@ -81,22 +79,20 @@ class Agent:
     def __init__(self):
         """Initialize agent with system prompt and empty conversation history."""
         # Conversation history: system prompt + all user/assistant/tool messages
-        self.messages = [
+        self.messages: list[dict[str, Any]] = [
             {"role": "system", "content": SYSTEM_PROMPT}
         ]
-        # Safety guardrails — same as toy agent
+        # Safety guardrails
         self.max_iterations = 10     # Prevent infinite tool-call loops
         self.total_tokens_used = 0
         self.max_total_tokens = 50000  # Cost safety limit per conversation
         # Context window management: keep only the last N messages plus system prompt
-        # This is a simple heuristic; more sophisticated approaches could be implemented if needed (e.g., summarization, relevance scoring).
+        # This is a simple heuristic; more sophisticated approaches if needed (e.g., summarization, etc.).
         self.max_history_messages = 20  # Tune as needed
 
-    def _call_llm_with_retry(self, **kwargs):
-        """
-        Call the LLM with exponential backoff retry on transient errors.
-        Implements Layer 3: Resilience & Retry Logic from solid_agent_practices.
-        """
+    @staticmethod
+    def _call_llm_with_retry(**kwargs) -> Any | None:
+        """Call the LLM with exponential backoff retry on transient errors."""
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -108,6 +104,7 @@ class Agent:
                 wait = (2 ** attempt) + random.uniform(0, 1)
                 logger.warning(f"LLM call failed (attempt {attempt+1}): {e}. Retrying in {wait:.1f}s...")
                 time.sleep(wait)
+        return None
 
     def _get_trimmed_history(self):
         """Return system prompt + last max_history_messages messages (for LLM context)."""
@@ -122,13 +119,14 @@ class Agent:
         Process a user message and return the agent's final response.
 
         Runs the agent loop: appends user message → calls LLM → executes any
-        tool calls → repeats until LLM gives a final answer.
+        tool calls → repeats until LLM gives a final answer. ReAct Pattern
 
         Args:
             user_input: The user's natural-language question or request
 
         Returns:
             The agent's final response as a string
+            Other formats like visual plots may come from the execution of tools, but from the agent (LLM) itself - strings
         """
         # Enforce token budget before starting
         if self.total_tokens_used > self.max_total_tokens:
@@ -147,10 +145,9 @@ class Agent:
             logger.info(f"----- Iteration {iteration} -----")
 
             # Call the LLM with the current conversation and tool definitions
-            # [PROVIDER: GroqCloud] — tool schema format and response structure
-            # follow OpenAI's function calling spec
+            # [PROVIDER: GroqCloud] — tool schema format and response structure follows OpenAI's function calling spec
             trimmed_history = self._get_trimmed_history()
-            # Layer 3: Resilience & Retry Logic
+            # Resilience & Retry Logic
             response = self._call_llm_with_retry(
                 model=MODEL_NAME,
                 messages=trimmed_history,
