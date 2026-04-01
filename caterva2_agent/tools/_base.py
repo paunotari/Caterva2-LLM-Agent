@@ -11,12 +11,11 @@ These are shared across browsing, analysis, and data_access tools.
 """
 
 from typing import Any, Protocol, runtime_checkable
-import numpy as np
 
 import caterva2 as cat2
+from caterva2 import Client
 
 from caterva2_agent.config import CATERVA2_URLBASE
-
 
 # ---------------------------------------------------------------------------
 # OBJECT REGISTRY FOR NOTEBOOK INTEGRATION
@@ -83,8 +82,7 @@ def set_notebook_namespace(namespace: dict) -> None:
     """
     Set the notebook namespace for local variable access.
     
-    Called by notebook.py before agent.run() to enable tools to read
-    user-created variables.
+    Called by notebook.py before agent.run() to enable tools to read user-created variables.
     
     Args:
         namespace: The notebook's user_ns dict (from get_ipython().user_ns)
@@ -99,13 +97,13 @@ def get_notebook_namespace() -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# CATERVA2 CLIENT MANAGEMENT
+# Caterva2 CLIENT MANAGEMENT
 # ---------------------------------------------------------------------------
 
 _cat2_client: cat2.Client | None = None
 
 
-def _get_client() -> cat2.Client:
+def _get_client() -> Client | None:
     """
     Create (if needed) and return a Caterva2 Client for the configured subscriber URL.
     
