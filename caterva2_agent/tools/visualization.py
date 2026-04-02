@@ -351,7 +351,20 @@ def visualize_dataset(
         data = np.asarray(data)
         actual_ndim = data.ndim
         
-        print(f"   Data to visualize: shape={data.shape}, ndim={actual_ndim}")
+        print(f"   Data to visualize: shape={data.shape}, ndim={actual_ndim}, dtype={data.dtype}")
+        
+        # Handle structured/compound dtypes — extract first field
+        if data.dtype.names is not None:
+            # Structured array with multiple fields
+            first_field = data.dtype.names[0]
+            print(f"   Structured dtype detected with fields: {data.dtype.names}")
+            print(f"   Extracting field '{first_field}' for visualization")
+            data = data[first_field]
+            print(f"   After extraction: shape={data.shape}, dtype={data.dtype}")
+        
+        # NOTE: Visualization does NOT inject data into notebook namespace.
+        # This is intentional — visualization is for viewing, not working with data.
+        # To get data for manipulation, use get_slice or where_filter instead.
         
         # --- Handle ≥4D: Error with guidance ---
         if actual_ndim >= 4:
@@ -394,6 +407,27 @@ def visualize_dataset(
                 data = zoom(data, zoom_factor, order=1)
                 downsampled = True
                 print(f"   Downsampled 2D: factor={zoom_factor:.3f}, new shape={data.shape}")
+            
+            # Further downsample if aspect ratio is still extreme (for interactive performance)
+            aspect_ratio = max(data.shape) / min(data.shape)
+            if aspect_ratio > 100:
+                print(f"   ⚠ Extreme aspect ratio ({data.shape[0]} × {data.shape[1]}), further downsampling...")
+                # Aggressively downsample the long dimension to ~1000 pixels max
+                max_long_dim = 1000
+                if max(data.shape) > max_long_dim:
+                    # Use striding instead of zoom to avoid rounding issues
+                    if data.shape[0] < data.shape[1]:
+                        # Wide: downsample columns by striding
+                        stride = max(1, data.shape[1] // max_long_dim)
+                        data = data[:, ::stride]
+                    else:
+                        # Tall: downsample rows by striding
+                        stride = max(1, data.shape[0] // max_long_dim)
+                        data = data[::stride, :]
+                    
+                    downsampled = True
+                    print(f"   Further downsampled 2D: new shape={data.shape}")
+                    print(f"   Suggestion: Use slices to visualize a specific region-of-interest")
             
             fig = _plot_2d(data, plot_title, colorscale)
             viz_type = "heatmap"

@@ -4,6 +4,7 @@ Data access tools for retrieving values from datasets.
 Tools in this module:
 - get_slice: Retrieve a portion of dataset values with safety limits
 - where_filter: Conditional selection using where() — filter data based on conditions
+- load_dataset: Load entire dataset into notebook (with safety checks)
 
 Works with both:
 - Server datasets (path starts with '@')
@@ -12,7 +13,7 @@ Works with both:
 
 from typing import Dict, Any
 
-from ._base import resolve_data, _to_json_safe, register_fetched_object
+from ._base import resolve_data, _to_json_safe, register_fetched_object, fetch_and_register_data
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +136,34 @@ DATA_ACCESS_TOOLS = [
                     }
                 },
                 "required": ["path", "operator", "threshold"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_dataset",
+            "description": (
+                "Load an entire dataset into the notebook for manipulation. "
+                "Use this when you want to work with the complete dataset in memory. "
+                "SAFETY: Checks dataset size before loading - rejects if too large. "
+                "For large datasets (>10K elements), the tool will suggest using get_slice instead. "
+                "The loaded data becomes available as a numpy array variable in the notebook. "
+                "Works with both server datasets (@path) and local variables (variable_name)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Server dataset path (e.g. '@public/examples/ds-1d.b2nd') "
+                            "OR local variable name (e.g. 'my_data'). "
+                            "Use '@' prefix for server datasets, plain name for local variables."
+                        )
+                    }
+                },
+                "required": ["path"]
             }
         }
     }
@@ -551,3 +580,84 @@ def where_filter(
     except Exception as e:
         print(f"   ✗ Failed: {e}")
         return {"error": f"Failed to filter '{path}': {e}"}
+
+
+# ---------------------------------------------------------------------------
+# LOAD DATASET
+# ---------------------------------------------------------------------------
+
+def load_dataset(path: str) -> Dict[str, Any]:
+    """
+    Load an entire dataset into the notebook for manipulation.
+    
+    This is the explicit "I want all of this data" tool. It loads the complete
+    dataset (after decompression if from Caterva2) into memory as a numpy array.
+    
+    Safety: Enforces the same 10K element limit as get_slice. For larger datasets,
+    suggests using get_slice to fetch specific regions instead.
+    
+    Args:
+        path: Server dataset path (e.g. '@public/examples/ds-1d.b2nd')
+              OR local variable name (e.g. 'my_data')
+    
+    Returns:
+        Dict with dataset metadata, summary, and data values, or 'error' on failure.
+    """
+    from ._base import fetch_and_register_data
+    
+    is_local = not path.startswith("@")
+    source_type = "local variable" if is_local else "server dataset"
+    
+    print(f"→ Loading full {source_type}: '{path}'")
+    
+    try:
+        # Fetch the entire dataset with safety check
+        data, metadata = fetch_and_register_data(
+            path=path,
+            slice_spec=None,  # Full dataset
+            max_elements=MAX_SLICE_ELEMENTS
+        )
+        
+        print(f"   ✓ Loaded: shape={metadata['shape']}, dtype={metadata['dtype']}")
+        print(f"   Size: {metadata['size_mb']} MB ({data.size:,} elements)")
+        
+        if metadata['registered']:
+            print(f"   📦 Available in notebook for manipulation")
+        
+        # Convert to JSON-safe format
+        data_json = _to_json_safe(data)
+        
+        # Compute summary statistics
+        summary = _compute_summary(data)
+        
+        result = {
+            "status": "success",
+            "path": path,
+            "source": metadata['source'],
+            "shape": metadata['shape'],
+            "dtype": metadata['dtype'],
+            "size_bytes": metadata['size_bytes'],
+            "size_mb": metadata['size_mb'],
+            "num_elements": data.size,
+            "summary": summary,
+            "registered_in_notebook": metadata['registered']
+        }
+        
+        # Include full data if small enough for LLM context
+        if data.size <= SUMMARY_THRESHOLD:
+            result["data"] = data_json
+        else:
+            result["note"] = (
+                f"Data has {data.size} elements — showing summary only. "
+                f"Data is available in your notebook for direct manipulation."
+            )
+        
+        return result
+    
+    except ValueError as e:
+        # Size limit exceeded or variable not found
+        print(f"   ✗ Error: {e}")
+        return {"error": str(e)}
+    except Exception as e:
+        print(f"   ✗ Failed: {e}")
+        return {"error": f"Failed to load '{path}': {e}"}

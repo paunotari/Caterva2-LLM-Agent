@@ -236,6 +236,79 @@ def resolve_data(path_or_name: str) -> ResolvedData:
 
 
 # ---------------------------------------------------------------------------
+# SAFE DATA FETCHING WITH AUTO-INJECTION
+# ---------------------------------------------------------------------------
+
+def fetch_and_register_data(
+    path: str,
+    slice_spec: tuple | None = None,
+    max_elements: int = 10_000
+) -> tuple[Any, dict[str, Any]]:
+    """
+    Fetch data from a dataset and register it for notebook injection.
+    
+    This is the common path for all data-fetching tools (get_slice, where_filter,
+    load_dataset). It enforces safety limits and handles both server datasets
+    and local variables.
+    
+    Args:
+        path: Server dataset path (e.g. '@public/data.b2nd') or local variable name
+        slice_spec: Slice tuple (e.g. (slice(0, 100),)) or None for full dataset
+        max_elements: Maximum number of elements to fetch
+    
+    Returns:
+        Tuple of (data_array, metadata_dict)
+        - data_array: The fetched numpy array
+        - metadata_dict: Info about the fetch (shape, size, etc.)
+    
+    Raises:
+        ValueError: If data exceeds max_elements or other validation fails
+    """
+    import numpy as np
+    
+    # Resolve the data source
+    resolved = resolve_data(path)
+    is_local = resolved.source == 'local'
+    
+    # Determine what to fetch
+    if slice_spec is None:
+        # Full dataset - check size first
+        total_elements = np.prod(resolved.shape)
+        if total_elements > max_elements:
+            raise ValueError(
+                f"Dataset has {total_elements:,} elements, exceeding limit of {max_elements:,}. "
+                f"Use slices to fetch a smaller region."
+            )
+        data = resolved[:] if not is_local else resolved.data
+    else:
+        # Sliced region
+        data = resolved[slice_spec]
+    
+    # Ensure it's a numpy array
+    data = np.asarray(data)
+    
+    # Calculate size for metadata
+    data_size_bytes = data.nbytes
+    data_size_mb = data_size_bytes / (1024 * 1024)
+    
+    # Register for notebook injection (only for server datasets)
+    if not is_local:
+        register_fetched_object(path, data)
+    
+    # Build metadata
+    metadata = {
+        "source": resolved.source,
+        "shape": list(data.shape),
+        "dtype": str(data.dtype),
+        "size_bytes": data_size_bytes,
+        "size_mb": round(data_size_mb, 2),
+        "registered": not is_local  # Local vars are already in namespace
+    }
+    
+    return data, metadata
+
+
+# ---------------------------------------------------------------------------
 # JSON SERIALIZATION UTILITIES
 # ---------------------------------------------------------------------------
 
