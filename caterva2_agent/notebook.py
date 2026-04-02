@@ -41,7 +41,7 @@ from caterva2_agent.tools._base import pop_fetched_objects, set_notebook_namespa
 _agent: Agent | None = None
 
 # Registry of objects the agent has fetched, keyed by variable name
-# Format: {"temperature": <ndarray>, "gaia_slice": <ndarray>, ...}
+# Format: {"temp_data": <ndarray>, "gaia_slice": <ndarray>, ...}
 _agent_objects: dict[str, Any] = {}
 
 # Input length limit (same as main.py)
@@ -108,7 +108,7 @@ def _unique_name(base_name: str, namespace: dict) -> str:
     """
     Generate a unique variable name that doesn't collide with existing names.
     
-    If 'temperature' exists, returns 'temperature_1', 'temperature_2', etc.
+    If 'temp_data' exists, returns 'temp_data_1', 'temp_data_2', etc.
     """
     if base_name not in namespace and base_name not in _agent_objects:
         return base_name
@@ -293,6 +293,8 @@ def _get_agent() -> Agent:
     global _agent
     if _agent is None:
         _agent = Agent()
+    # Type checker: _agent is Agent here (never None after this point)
+    assert _agent is not None
     return _agent
 
 
@@ -314,14 +316,14 @@ def chat(message: str) -> None:
         message: Your question or request in natural language
     
     Example:
-        >>> chat("Show me the temperature dataset")
-        # Agent fetches from server, injects as `temperature`
+        1. chat("Show me the temperature dataset")
+           # Agent fetches from server, injects as `temp_data`
         
-        >>> # User transforms the data
-        >>> my_temps = temperature * 1.8 + 32
+        2. User transforms the data (in your notebook cell):
+           my_temps = temp_data * 1.8 + 32
         
-        >>> chat("Compute stats on {my_temps}")
-        # Agent operates on the user's local variable
+        3. chat("Compute stats on {my_temps}")
+           # Agent operates on the user's local variable
     """
     message = message.strip()
     
@@ -373,14 +375,12 @@ def chat(message: str) -> None:
         # Display response with Markdown formatting in Jupyter
         _display_response(response)
         
-        return None  # Response already displayed; return None to avoid duplicate
     except Exception as e:
         error_msg = f"[Error: {type(e).__name__}: {e}]"
         print(error_msg)
         print("Try again or call reset() to clear the conversation.")
         # Auto-reset on unhandled exception (same as main.py)
         agent.reset()
-        return error_msg
 
 
 def reset() -> None:
@@ -480,7 +480,8 @@ def _display_response(response: str) -> None:
     """
     try:
         display(Markdown(response))
-    except Exception:
+    except (RuntimeError, ValueError, AttributeError):
+        # display() is unavailable or failed (not in Jupyter, or rendering error)
         print(response)
 
 
