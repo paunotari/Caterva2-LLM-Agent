@@ -106,16 +106,19 @@ def get_dataset_stats(
         Dict with dataset metadata and computed statistics, or 'error' on failure.
     """
     # Validate and default the stats list
+    stats_list: list[str]
     if stats is None:
-        stats = DEFAULT_STATS
+        stats_list = DEFAULT_STATS
+    else:
+        stats_list = stats
     
-    invalid_stats = set(stats) - SUPPORTED_STATS
+    invalid_stats = set(stats_list) - SUPPORTED_STATS
     if invalid_stats:
         return {"error": f"Unsupported statistics: {invalid_stats}. Valid options: {SUPPORTED_STATS}"}
 
     source_type = "local variable" if not path.startswith('@') else "server dataset"
     print(f"→ Computing stats for {source_type}: '{path}'")
-    print(f"   Stats: {stats}, axis: {axis}")
+    print(f"   Stats: {stats_list}, axis: {axis}")
 
     try:
         resolved = resolve_data(path)
@@ -134,7 +137,7 @@ def get_dataset_stats(
         # Compute each requested statistic
         # For local numpy arrays, we need to use numpy functions
         # For server datasets, we use the dataset methods
-        for stat_name in stats:
+        for stat_name in stats_list:
             if resolved.is_local():
                 # Use numpy functions for local arrays
                 if stat_name == "argmin":

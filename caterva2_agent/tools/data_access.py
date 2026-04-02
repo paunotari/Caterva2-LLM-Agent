@@ -239,7 +239,7 @@ def _default_slice_for_shape(shape: tuple, max_elements: int) -> tuple:
     if len(shape) == 1:
         return (slice(0, min(shape[0], max_elements)),)
     
-    # For multi-dimensional, take a hypercube from the start
+    # For multidimensional, take a hypercube from the start
     # Calculate how many elements per dimension (geometric mean approach)
     import math
     ndim = len(shape)
@@ -416,7 +416,7 @@ def where_filter(
     - value_if_true where the condition is met
     - value_if_false where the condition is not met
     
-    This is implemented using numpy's where function on the fetched slice.
+    This is implemented using NumPy's where function on the fetched slice.
     The tool is stateless — it fetches data fresh each call. If you previously
     used get_slice on a region, pass the same slice here to filter that region.
     

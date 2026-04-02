@@ -142,7 +142,7 @@ def _get_dataset(path: str) -> cat2.Dataset:
 @runtime_checkable
 class ArrayLike(Protocol):
     """Protocol for array-like objects (numpy, blosc2, etc.)."""
-    shape: tuple
+    shape: tuple[int, ...]
     dtype: Any
     def __getitem__(self, key) -> Any: ...
 
@@ -167,7 +167,7 @@ class ResolvedData:
         self.name = name
     
     @property
-    def shape(self) -> tuple:
+    def shape(self) -> tuple[int, ...]:
         return self.data.shape
     
     @property
