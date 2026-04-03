@@ -2,20 +2,20 @@
 Jupyter notebook interface for the Caterva2 agent.
 
 This module provides a cell-based interaction model where:
-- Users call `chat("message")` to interact with the agent
+- Users call `ask("message")` to interact with the agent
 - The agent injects fetched datasets into the notebook namespace
 - Users can modify variables with their own code
 - The agent can read user variables via {variable} syntax
 
 Key functions:
-- chat(message): Send a message to the agent, display response
+- ask(message): Send a question to the agent, display response
 - reset(): Clear agent memory (start fresh conversation)
 - history(): Display conversation history
 - variables(): List agent-injected variables
 
 Variable Reference Syntax:
 - Use {variable_name} to reference a local variable
-- Example: chat("Compute stats on {my_data}")
+- Example: ask("Compute stats on {my_data}")
 - The agent will see the variable's metadata (shape, dtype, sample values)
 
 The agent and user share the same Python namespace — this enables
@@ -37,7 +37,7 @@ from caterva2_agent.tools._base import pop_fetched_objects, set_notebook_namespa
 # MODULE STATE
 # ---------------------------------------------------------------------------
 
-# The agent instance — created on first chat() call or explicitly via reset()
+# The agent instance — created on first ask() call or explicitly via reset()
 _agent: Agent | None = None
 
 # Registry of objects the agent has fetched, keyed by variable name
@@ -47,7 +47,7 @@ _agent_objects: dict[str, Any] = {}
 # Input length limit (same as main.py)
 MAX_INPUT_CHARS = 5000
 
-# Pattern for {variable} references in chat messages
+# Pattern for {variable} references in user messages
 VARIABLE_REFERENCE_PATTERN = re.compile(r'\{(\w+)}')
 
 
@@ -235,13 +235,13 @@ def _describe_variable(name: str, value: Any) -> str:
 
 def _expand_variable_references(message: str, namespace: dict) -> tuple[str, list[str]]:
     """
-    Expand {variable} references in a chat message.
+    Expand {variable} references in a user's ask() message.
     
     Finds all {var} patterns, looks up each variable in the namespace,
     and builds context strings describing each referenced variable.
     
     Args:
-        message: The user's chat message with {variable} references
+        message: The user's ask() message with {variable} references
         namespace: The notebook namespace to look up variables
     
     Returns:
@@ -298,12 +298,12 @@ def _get_agent() -> Agent:
     return _agent
 
 
-def chat(message: str) -> None:
+def ask(message: str) -> None:
     """
-    Send a message to the agent and display its response.
+    Ask the agent a question about your datasets and display its response.
     
     This is the main interaction function. The agent will:
-    1. Process your message using its tools
+    1. Process your question using its tools
     2. Fetch any needed data from the Caterva2 server
     3. Inject fetched datasets into the notebook namespace
     4. Display the response with Markdown formatting
@@ -316,13 +316,13 @@ def chat(message: str) -> None:
         message: Your question or request in natural language
     
     Example:
-        1. chat("Show me the temperature dataset")
+        1. ask("Show me the temperature dataset")
            # Agent fetches from server, injects as `temp_data`
         
         2. User transforms the data (in your notebook cell):
            my_temps = temp_data * 1.8 + 32
         
-        3. chat("Compute stats on {my_temps}")
+        3. ask("Compute stats on {my_temps}")
            # Agent operates on the user's local variable
     """
     message = message.strip()
@@ -415,7 +415,7 @@ def history() -> None:
     agent = _get_agent()
     
     if len(agent.messages) <= 1:  # Only system prompt
-        print("No conversation history yet. Use chat() to start.")
+        print("No conversation history yet. Use ask() to start.")
         return
     
     print("=" * 60)
@@ -457,7 +457,7 @@ def variables() -> None:
     injected = list_injected_variables()
     
     if not injected:
-        print("No variables injected yet. Use chat() to fetch some data.")
+        print("No variables injected yet. Use ask() to fetch some data.")
         return
     
     print("📊 Agent-injected variables:")
@@ -490,5 +490,5 @@ def _display_response(response: str) -> None:
 # ---------------------------------------------------------------------------
 
 # Shorter aliases for common operations
-ask = chat  # Some users may prefer "ask" over "chat"
+chat = ask  # Backwards compatibility alias for "chat"
 clear = reset  # Alias for those who expect "clear" to reset
