@@ -378,10 +378,19 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
         data = resolved[slice_tuple]
         data_json = _to_json_safe(data)
         
-        # Register for notebook injection (user can access as a variable)
+        # Generate variable name and register for notebook injection
         # Only register if this is from server (local vars are already in namespace)
+        variable_name = None
         if not is_local:
-            register_fetched_object(path, data)
+            # Sanitize path to create a valid Python identifier
+            # '@public/examples/ds-3d.b2nd' → 'ds_3d'
+            base_name = path.split('/')[-1]  # Get filename
+            base_name = base_name.replace('.b2nd', '').replace('.b2frame', '')
+            base_name = base_name.replace('-', '_').replace('@', '').replace('.', '_')
+            variable_name = base_name
+            
+            register_fetched_object(variable_name, data)
+            print(f"   ✓ Registered as: '{variable_name}'")
         
         # Pre-compute summary for LLM presentation
         summary = _compute_summary(data)
@@ -396,6 +405,11 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
             "summary": summary,
             "data": data_json
         }
+        
+        # Include variable name if this was registered
+        if variable_name:
+            result["variable_name"] = variable_name
+            result["note"] = f"Data stored as '{variable_name}' in notebook. Use this name to reference it in other tools."
         
         # Hint for the LLM on how to present results
         if summary["num_elements"] > SUMMARY_THRESHOLD:

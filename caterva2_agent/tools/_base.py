@@ -217,12 +217,16 @@ def resolve_data(path_or_name: str) -> ResolvedData:
             "not running in notebook context"
         )
     
-    if path_or_name not in namespace:
+    # Check notebook namespace first (user may have modified variables)
+    if path_or_name in namespace:
+        value = namespace[path_or_name]
+    # Also check fetched objects registry (from previous tool calls in same run)
+    elif path_or_name in _fetched_objects:
+        value = _fetched_objects[path_or_name]
+    else:
         raise ValueError(
             f"Variable '{path_or_name}' not found in notebook namespace"
         )
-    
-    value = namespace[path_or_name]
     
     # Validate it's array-like
     if not (hasattr(value, 'shape') and hasattr(value, 'dtype')):

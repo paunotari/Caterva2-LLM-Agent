@@ -295,6 +295,40 @@ def collapse_dimensions(
         
         print(f"   Input shape: {shape}, ndim: {ndim}")
         
+        # Calculate expected output size
+        expected_shape = list(shape)
+        expected_shape.pop(axis)
+        expected_size = np.prod(expected_shape) if expected_shape else 1
+        
+        # CRITICAL: Check if operation is feasible
+        # For massive datasets, even the OUTPUT might be too large
+        MAX_SAFE_OUTPUT = 100_000_000  # 100M elements (~400MB for float32)
+        
+        if expected_size > MAX_SAFE_OUTPUT:
+            # Calculate reasonable stride for downsampling
+            target_size = 2000  # Aim for 2000×2000 or equivalent
+            current_max_dim = max(expected_shape)
+            suggested_stride = max(1, current_max_dim // target_size)
+            
+            stride_example = ','.join(
+                f'::{suggested_stride}' if i != axis else ':'
+                for i in range(ndim)
+            )
+            
+            return {
+                "error": f"Output would be too large: {expected_size:,} elements "
+                        f"({expected_size * 4 / 1e9:.2f} GB for float32)",
+                "input_shape": list(shape),
+                "output_shape": expected_shape,
+                "axis": axis,
+                "suggestion": f"For datasets this massive, first downsample via strided slicing:\n"
+                             f"  1. Fetch downsampled data: get_slice('{path}', '{stride_example}', max_size=10000000)\n"
+                             f"  2. Then collapse the smaller result\n"
+                             f"This reduces {shape} → ~{tuple(max(1, s // suggested_stride) for s in shape)} "
+                             f"before collapsing, making the operation feasible.",
+                "note": "For truly massive datasets, consider pre-computed projections or tiled processing."
+            }
+        
         # Execute the reduction
         # For server datasets, this executes server-side on Blosc2
         # For local arrays, uses numpy

@@ -1,8 +1,9 @@
 """
-Visualization tools for rendering datasets as interactive Plotly plots.
+Visualization tools for rendering datasets as interactive Plotly plots and static images.
 
 Tools in this module:
 - visualize_dataset: Auto-detect dimensionality and render appropriate plot
+- render_projection: Generate static 2D image from 3D+ data (for giant datasets)
 
 Supported visualizations:
 - 1D: Line plot (x=index, y=value)
@@ -10,7 +11,8 @@ Supported visualizations:
 - 3D: Volume rendering (ideal for tomographies)
 - ≥4D: Error with guidance to slice down
 
-Output: Displays inline in Jupyter notebooks via fig.show()
+Interactive plots (visualize_dataset): Display inline in Jupyter notebooks via fig.show()
+Static images (render_projection): Return base64-encoded PNG for giant datasets
 
 Works with both:
 - Server datasets (path starts with '@')
@@ -18,10 +20,15 @@ Works with both:
 """
 
 from typing import Dict, Any
+import base64
+from io import BytesIO
 
 import numpy as np
 import plotly.graph_objects as go
 from scipy.ndimage import zoom
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend for server-side rendering
+import matplotlib.pyplot as plt
 
 from ._base import resolve_data
 from .data_access import _parse_slice_string
@@ -39,6 +46,10 @@ DEFAULT_COLORSCALE = "Viridis"
 
 # Default opacity for 3D volume rendering (lower = more transparent)
 DEFAULT_OPACITY = 0.3
+
+# Maximum pixels for static image rendering (2000×2000 = 4M pixels)
+# Keeps PNG file size reasonable while providing good detail
+MAX_STATIC_IMAGE_PIXELS = 2000
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +122,75 @@ VISUALIZATION_TOOLS = [
                     }
                 },
                 "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "render_projection",
+            "description": (
+                "Generate a static 2D image from multi-dimensional data via dimension reduction. "
+                "CRITICAL for GIANT datasets (multi-GB, billions of elements) that exceed interactive plot limits. "
+                "This tool executes server-side reduction on compressed data, then renders a PNG image. "
+                "Common use cases: "
+                "- Medical tomography: 3D volume → 2D max-intensity projection (MIP) "
+                "- Climate data: 4D (time, lat, lon, alt) → 3D time-averaged spatial map → 2D slice "
+                "- Point clouds: 3D positions → 2D density heatmap "
+                "The image is automatically downsampled to reasonable pixel dimensions (max 2000×2000) "
+                "and returned as base64-encoded PNG for display in notebooks. "
+                "Works with both server datasets (@path) and local variables (variable_name)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Server dataset path (e.g. '@public/large/gaia-3d.b2nd') "
+                            "OR local variable name (e.g. 'volume_data'). "
+                            "Use '@' prefix for server datasets, plain name for local variables."
+                        )
+                    },
+                    "axis": {
+                        "type": "integer",
+                        "description": (
+                            "Axis along which to collapse/project the data (0-indexed). "
+                            "For a 3D array with shape (100, 200, 300): "
+                            "- axis=0 projects along first dimension → result is 2D (200, 300) image "
+                            "- axis=1 projects along second dimension → result is 2D (100, 300) image "
+                            "- axis=2 projects along third dimension → result is 2D (100, 200) image"
+                        )
+                    },
+                    "operation": {
+                        "type": "string",
+                        "enum": ["max", "mean", "sum", "min", "std"],
+                        "description": (
+                            "Projection operation to apply: "
+                            "- 'max': Maximum intensity projection (standard for tomographies) "
+                            "- 'mean': Average projection (reduces noise) "
+                            "- 'sum': Sum projection (useful for density maps, counting) "
+                            "- 'min': Minimum intensity projection "
+                            "- 'std': Standard deviation projection (shows variability)"
+                        )
+                    },
+                    "colormap": {
+                        "type": "string",
+                        "description": (
+                            "Matplotlib colormap name for the image. "
+                            "Options: 'viridis', 'plasma', 'inferno', 'gray', 'hot', 'cool', 'jet', etc. "
+                            "Default: 'viridis'"
+                        )
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": (
+                            "Optional custom title for the image. "
+                            "If not provided, auto-generates from path and operation."
+                        )
+                    }
+                },
+                "required": ["path", "axis", "operation"]
             }
         }
     }
@@ -331,13 +411,31 @@ def visualize_dataset(
             # For very large datasets, we need to be careful
             total_elements = np.prod(shape)
             if total_elements > max_size_final * 10:
-                # Dataset is way too large to fetch entirely — require slices
+                # Dataset is way too large to fetch entirely
+                # Guide the agent toward dimension reduction for giant datasets
+                ndim = len(shape)
+                
+                suggestion_text = ""
+                if ndim >= 3:
+                    # For 3D+ data, suggest collapse_dimensions
+                    suggestion_text = (
+                        f"This {ndim}D dataset is too large for interactive visualization. "
+                        f"Recommended approaches:\n"
+                        f"1. Use collapse_dimensions('{path}', axis=N, operation='max'|'mean'|'sum') "
+                        f"to reduce {ndim}D → {ndim-1}D via server-side aggregation\n"
+                        f"2. Or provide 'slices' to select a small region like '0, :, :' for inspection"
+                    )
+                else:
+                    # For 1D/2D, slicing is more appropriate
+                    suggestion_text = (
+                        f"Dataset too large ({total_elements:,} elements). "
+                        f"Use 'slices' to visualize a region, e.g., '0:{min(1000, shape[0])}'"
+                    )
+                
                 return {
-                    "error": f"Data has {total_elements:,} elements — too large to visualize directly. "
-                             f"Please provide 'slices' to select a smaller region.",
+                    "error": f"Data has {total_elements:,} elements — too large to visualize directly.",
                     "shape": list(shape),
-                    "suggestion": f"Try slices like '0:{min(100, shape[0])}' for 1D, "
-                                  f"or '0, :, :' for a 2D slice of a 3D array."
+                    "suggestion": suggestion_text
                 }
             data = resolved[:]
         
@@ -480,3 +578,176 @@ def visualize_dataset(
     except Exception as e:
         print(f"   ✗ Failed: {e}")
         return {"error": f"Failed to visualize '{path}': {e}"}
+
+
+# ---------------------------------------------------------------------------
+# STATIC IMAGE RENDERING FOR GIANT DATASETS
+# ---------------------------------------------------------------------------
+
+def render_projection(
+    path: str,
+    axis: int,
+    operation: str,
+    colormap: str | None = None,
+    title: str | None = None
+) -> Dict[str, Any]:
+    """
+    Generate a static 2D image from multi-dimensional data via projection.
+    
+    This is THE solution for giant datasets (multi-GB, billions of elements)
+    that cannot be rendered as interactive plots. The workflow:
+    1. Execute server-side dimension reduction (collapse_dimensions)
+    2. Downsample the 2D result to reasonable pixel dimensions (max 2000×2000)
+    3. Render as matplotlib PNG
+    4. Return base64-encoded image for notebook display
+    
+    Common use cases:
+    - Medical tomography: 3D CT scan → 2D max-intensity projection
+    - Climate data: 4D weather → 3D time-average → 2D slice
+    - Astronomy: 3D density cube → 2D projected density map
+    
+    Args:
+        path: Server dataset path (e.g. '@public/large/gaia.b2nd')
+              OR local variable name (e.g. 'volume_data')
+        axis: Which axis to project along (0-indexed)
+        operation: Projection method: 'max', 'mean', 'sum', 'min', 'std'
+        colormap: Matplotlib colormap name (default: 'viridis')
+        title: Optional custom title (default: auto-generated)
+    
+    Returns:
+        Dict with base64 PNG image and metadata, or 'error' on failure.
+    """
+    from .analysis import collapse_dimensions, SUPPORTED_REDUCTIONS
+    from IPython.display import Image as IPythonImage
+    
+    # Validate operation
+    if operation not in SUPPORTED_REDUCTIONS:
+        return {
+            "error": f"Unsupported operation: '{operation}'. "
+                    f"Valid options: {sorted(SUPPORTED_REDUCTIONS)}"
+        }
+    
+    # Apply defaults
+    colormap_final = colormap or 'viridis'
+    
+    source_type = "local variable" if not path.startswith('@') else "server dataset"
+    print(f"→ Rendering projection of {source_type}: '{path}'")
+    print(f"   Operation: {operation} along axis={axis}")
+    print(f"   Colormap: {colormap_final}")
+    
+    try:
+        # Step 1: Collapse dimension using existing tool
+        collapse_result = collapse_dimensions(
+            path=path,
+            axis=axis,
+            operation=operation,
+            variable_name=None  # Let it auto-generate
+        )
+        
+        if "error" in collapse_result:
+            # Propagate error from collapse_dimensions
+            return collapse_result
+        
+        # Get the collapsed 2D data
+        from ._base import get_fetched_objects
+        fetched = get_fetched_objects()
+        var_name = collapse_result["variable_name"]
+        data_2d = fetched[var_name]
+        
+        print(f"   Collapsed to 2D: {data_2d.shape}")
+        
+        # Step 2: Downsample if needed for reasonable image size
+        original_shape = data_2d.shape
+        max_dim = MAX_STATIC_IMAGE_PIXELS
+        
+        if data_2d.shape[0] > max_dim or data_2d.shape[1] > max_dim:
+            # Calculate zoom factors to fit within max_dim × max_dim
+            zoom_h = min(1.0, max_dim / data_2d.shape[0])
+            zoom_w = min(1.0, max_dim / data_2d.shape[1])
+            zoom_factor = min(zoom_h, zoom_w)
+            
+            data_2d = zoom(data_2d, zoom_factor, order=1)  # Bilinear interpolation
+            print(f"   Downsampled for rendering: {original_shape} → {data_2d.shape}")
+        else:
+            zoom_factor = 1.0
+        
+        # Step 3: Render as matplotlib figure
+        fig, ax = plt.subplots(figsize=(10, 8), dpi=100)
+        
+        # Create the image
+        im = ax.imshow(data_2d, cmap=colormap_final, aspect='auto', origin='lower')
+        
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label('Value', rotation=270, labelpad=20)
+        
+        # Set title
+        if title is None:
+            # Auto-generate title
+            base_name = path.split('/')[-1] if path.startswith('@') else path
+            title = f"{base_name} - {operation.upper()} projection (axis {axis})"
+        ax.set_title(title, fontsize=12, pad=10)
+        
+        # Labels
+        ax.set_xlabel('Dimension 1 (pixels)', fontsize=10)
+        ax.set_ylabel('Dimension 0 (pixels)', fontsize=10)
+        
+        plt.tight_layout()
+        
+        # Step 4: Convert to base64 PNG
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png', dpi=100, bbox_inches='tight')
+        plt.close(fig)  # Free memory
+        buffer.seek(0)
+        
+        image_base64 = base64.b64encode(buffer.read()).decode('utf-8')
+        image_data_uri = f"data:image/png;base64,{image_base64}"
+        
+        print(f"   ✓ Rendered as {data_2d.shape[1]}×{data_2d.shape[0]} PNG")
+        
+        # Display in notebook if running in IPython
+        try:
+            from IPython.display import display
+            display(IPythonImage(data=base64.b64decode(image_base64)))
+            print("   ✓ Displayed in notebook")
+        except:
+            # Not in IPython environment, skip display
+            pass
+        
+        # Build response
+        result = {
+            "status": "success",
+            "image": image_data_uri,
+            "format": "png",
+            "source_path": path,
+            "operation": operation,
+            "axis_collapsed": axis,
+            "original_shape": list(original_shape),
+            "rendered_shape": list(data_2d.shape),
+            "colormap": colormap_final,
+            "data_range": {
+                "min": float(np.min(data_2d)),
+                "max": float(np.max(data_2d))
+            },
+            "note": (
+                f"Static 2D projection generated from {len(collapse_result['source_shape'])}D data. "
+                f"Collapsed via {operation} along axis {axis}. "
+                f"Rendered as {data_2d.shape[1]}×{data_2d.shape[0]} PNG. "
+                f"Image displayed in notebook and available as data URI."
+            )
+        }
+        
+        if zoom_factor < 1.0:
+            result["downsampled"] = True
+            result["downsample_factor"] = round(zoom_factor, 3)
+        
+        return result
+    
+    except ValueError as e:
+        print(f"   ✗ {e}")
+        return {"error": str(e)}
+    except Exception as e:
+        print(f"   ✗ Failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"error": f"Failed to render projection for '{path}': {e}"}
