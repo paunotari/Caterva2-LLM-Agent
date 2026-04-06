@@ -4,13 +4,15 @@ Browsing tools for discovering datasets on a Caterva2 server.
 Tools in this module:
 - list_roots: List top-level data collections
 - list_datasets: List items within a root/path (with pagination)
-- get_dataset_info: Get metadata for a specific dataset
+- get_dataset_info: Get metadata for a specific dataset or local variable
 """
 
 from typing import Dict, Any
 
-from ._base import _get_client
-from config import CATERVA2_URLBASE
+import numpy as np
+
+from ._base import _get_client, get_notebook_namespace
+from caterva2_agent.config import CATERVA2_URLBASE
 
 
 # ---------------------------------------------------------------------------
@@ -76,10 +78,12 @@ BROWSING_TOOLS = [
         "function": {
             "name": "get_dataset_info",
             "description": (
-                "Retrieve detailed metadata about a specific dataset. "
-                "Returns shape, dtype, chunk layout, block layout, compression info, "
-                "and modification time. "
-                "Use this when the user asks about a dataset's structure or properties."
+                "Retrieve detailed metadata about a dataset or local variable. "
+                "For server datasets: returns shape, dtype, chunk layout, block layout, "
+                "compression info, and modification time. "
+                "For local variables: returns shape, dtype, size, and memory info. "
+                "Use this when the user asks about a dataset's structure or properties. "
+                "Works with both server datasets (@path) and local variables (variable_name)."
             ),
             "parameters": {
                 "type": "object",
@@ -87,10 +91,9 @@ BROWSING_TOOLS = [
                     "path": {
                         "type": "string",
                         "description": (
-                            "Full path to the dataset including the root name. "
-                            "Root names always start with '@'. "
-                            "Use the exact paths returned by list_datasets — never drop the '@' prefix. "
-                            "Example: '@public/examples/ds-2d-fields.b2nd'"
+                            "Server dataset path (e.g. '@public/examples/ds-2d-fields.b2nd') "
+                            "OR local variable name (e.g. 'my_data'). "
+                            "Use '@' prefix for server datasets, plain name for local variables."
                         )
                     }
                 },
@@ -165,23 +168,77 @@ def list_datasets(path: str, limit: int = 50, offset: int = 0) -> Dict[str, Any]
 
 def get_dataset_info(path: str) -> Dict[str, Any]:
     """
-    Retrieve metadata for a specific dataset.
+    Retrieve metadata for a dataset or local variable.
+
+    For server datasets: returns full metadata (shape, dtype, chunks, compression, etc.)
+    For local variables: returns basic numpy metadata (shape, dtype, size, memory)
 
     Args:
-        path: Full path including root (e.g. '@public/examples/ds-2d-fields.b2nd')
+        path: Server dataset path (e.g. '@public/examples/ds-2d-fields.b2nd')
+              OR local variable name (e.g. 'my_data')
 
     Returns:
-        Dict with dataset properties (shape, dtype, chunks, etc.), or 'error' on failure.
+        Dict with dataset/variable properties, or 'error' on failure.
     """
-    print(f"→ Fetching metadata for dataset: '{path}'")
-    print(f"   API: client.get_info('{path}')")
-    try:
-        client = _get_client()
-        info = client.get_info(path)
-        # info is already a dict — serialize any non-JSON-safe values to strings
-        safe_info = {k: str(v) if not isinstance(v, (str, int, float, list, dict, bool, type(None))) else v
-                     for k, v in info.items()}
-        return {"path": path, "info": safe_info}
-    except Exception as e:
-        print("   ✗ Failed")
-        return {"error": f"Failed to get info for dataset '{path}': {e}"}
+    is_local = not path.startswith("@")
+    
+    if is_local:
+        # --- Local variable: basic numpy info ---
+        print(f"→ Fetching info for local variable: '{path}'")
+        
+        try:
+            namespace = get_notebook_namespace()
+            if namespace is None:
+                return {"error": f"No notebook namespace available. Cannot access local variable '{path}'."}
+            
+            if path not in namespace:
+                return {"error": f"Local variable '{path}' not found in notebook namespace."}
+            
+            obj = namespace[path]
+            
+            # Ensure it's array-like
+            if not hasattr(obj, 'shape'):
+                return {"error": f"Variable '{path}' is not array-like (no shape attribute)."}
+            
+            arr = np.asarray(obj)
+            
+            info = {
+                "name": path,
+                "source": "local variable",
+                "shape": list(arr.shape),
+                "ndim": arr.ndim,
+                "dtype": str(arr.dtype),
+                "size": int(arr.size),
+                "itemsize": int(arr.itemsize),
+                "nbytes": int(arr.nbytes),
+                "memory_mb": round(arr.nbytes / (1024 * 1024), 2),
+            }
+            
+            # Add stats for numeric arrays
+            if np.issubdtype(arr.dtype, np.number) and arr.size > 0:
+                info["min"] = float(np.nanmin(arr))
+                info["max"] = float(np.nanmax(arr))
+                info["mean"] = float(np.nanmean(arr))
+            
+            return {"path": path, "info": info}
+        
+        except Exception as e:
+            print(f"   ✗ Failed: {e}")
+            return {"error": f"Failed to get info for local variable '{path}': {e}"}
+    
+    else:
+        # --- Server dataset: full metadata via Caterva2 API ---
+        print(f"→ Fetching metadata for server dataset: '{path}'")
+        print(f"   API: client.get_info('{path}')")
+        
+        try:
+            client = _get_client()
+            info = client.get_info(path)
+            # info is already a dict — serialize any non-JSON-safe values to strings
+            safe_info = {k: str(v) if not isinstance(v, (str, int, float, list, dict, bool, type(None))) else v
+                         for k, v in info.items()}
+            safe_info["source"] = "server dataset"
+            return {"path": path, "info": safe_info}
+        except Exception as e:
+            print("   ✗ Failed")
+            return {"error": f"Failed to get info for server dataset '{path}': {e}"}

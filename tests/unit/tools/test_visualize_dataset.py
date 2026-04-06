@@ -106,3 +106,29 @@ class TestPlotHelpers:
         
         assert isinstance(fig, go.Figure)
         assert len(fig.data) == 1  # One volume trace
+
+
+class TestStructuredArrays:
+    """Tests for handling structured/compound dtypes from Caterva2."""
+    
+    def test_structured_array_field_extraction(self):
+        """Structured arrays should have first field extracted for visualization."""
+        from caterva2_agent.tools.visualization import visualize_dataset
+        from caterva2_agent.tools._base import set_notebook_namespace
+        
+        # Create a structured 2D array
+        structured_data = np.zeros((5, 5), dtype=[('a', '<f4'), ('b', '<f8')])
+        for i in range(5):
+            for j in range(5):
+                structured_data[i, j] = (i + j, i * j)
+        
+        # Mock local variable
+        namespace = {'test_struct': structured_data}
+        set_notebook_namespace(namespace)
+        
+        result = visualize_dataset('test_struct')
+        
+        # Should succeed and report heatmap
+        assert result['status'] == 'success'
+        assert result['visualization_type'] == 'heatmap'
+        assert result['rendered_shape'] == [5, 5]

@@ -1,14 +1,19 @@
 """
-Data access tools for retrieving values from Caterva2 datasets.
+Data access tools for retrieving values from datasets.
 
 Tools in this module:
 - get_slice: Retrieve a portion of dataset values with safety limits
 - where_filter: Conditional selection using where() — filter data based on conditions
+- load_dataset: Load entire dataset into notebook (with safety checks)
+
+Works with both:
+- Server datasets (path starts with '@')
+- Local variables (referenced by name)
 """
 
 from typing import Dict, Any
 
-from ._base import _get_dataset, _to_json_safe
+from ._base import resolve_data, _to_json_safe, register_fetched_object, fetch_and_register_data
 
 
 # ---------------------------------------------------------------------------
@@ -33,10 +38,11 @@ DATA_ACCESS_TOOLS = [
         "function": {
             "name": "get_slice",
             "description": (
-                "Retrieve a slice of data values from a dataset. "
+                "Retrieve a slice of data values from a dataset or local variable. "
                 "Use this when the user wants to see actual data, not just statistics. "
                 "SAFETY: Limited to 10,000 elements maximum to avoid memory issues. "
-                "For large datasets, use slicing to select a specific region of interest."
+                "For large datasets, use slicing to select a specific region of interest. "
+                "Works with both server datasets (@path) and local variables (variable_name)."
             ),
             "parameters": {
                 "type": "object",
@@ -44,8 +50,9 @@ DATA_ACCESS_TOOLS = [
                     "path": {
                         "type": "string",
                         "description": (
-                            "Full path to the dataset including the root name. "
-                            "Example: '@public/examples/ds-1d.b2nd'"
+                            "Server dataset path (e.g. '@public/examples/ds-1d.b2nd') "
+                            "OR local variable name (e.g. 'my_data'). "
+                            "Use '@' prefix for server datasets, plain name for local variables."
                         )
                     },
                     "slices": {
@@ -68,12 +75,13 @@ DATA_ACCESS_TOOLS = [
         "function": {
             "name": "where_filter",
             "description": (
-                "Filter dataset values based on a condition (like SQL WHERE). "
+                "Filter dataset or local variable values based on a condition (like SQL WHERE). "
                 "Returns value_if_true where condition is met, value_if_false otherwise. "
                 "Example use case: for elevation data, filter peaks above 3000m by returning "
                 "the actual elevation where > 3000, and 0 (or NaN) elsewhere. "
                 "This is useful for masking, thresholding, or highlighting specific data regions. "
-                "SAFETY: Limited to 10,000 elements maximum — use slices for larger datasets."
+                "SAFETY: Limited to 10,000 elements maximum — use slices for larger datasets. "
+                "Works with both server datasets (@path) and local variables (variable_name)."
             ),
             "parameters": {
                 "type": "object",
@@ -81,8 +89,9 @@ DATA_ACCESS_TOOLS = [
                     "path": {
                         "type": "string",
                         "description": (
-                            "Full path to the dataset including the root name. "
-                            "Example: '@public/examples/ds-1d.b2nd'"
+                            "Server dataset path (e.g. '@public/examples/ds-1d.b2nd') "
+                            "OR local variable name (e.g. 'my_data'). "
+                            "Use '@' prefix for server datasets, plain name for local variables."
                         )
                     },
                     "operator": {
@@ -127,6 +136,34 @@ DATA_ACCESS_TOOLS = [
                     }
                 },
                 "required": ["path", "operator", "threshold"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "load_dataset",
+            "description": (
+                "Load an entire dataset into the notebook for manipulation. "
+                "Use this when you want to work with the complete dataset in memory. "
+                "SAFETY: Checks dataset size before loading - rejects if too large. "
+                "For large datasets (>10K elements), the tool will suggest using get_slice instead. "
+                "The loaded data becomes available as a numpy array variable in the notebook. "
+                "Works with both server datasets (@path) and local variables (variable_name)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Server dataset path (e.g. '@public/examples/ds-1d.b2nd') "
+                            "OR local variable name (e.g. 'my_data'). "
+                            "Use '@' prefix for server datasets, plain name for local variables."
+                        )
+                    }
+                },
+                "required": ["path"]
             }
         }
     }
@@ -231,7 +268,7 @@ def _default_slice_for_shape(shape: tuple, max_elements: int) -> tuple:
     if len(shape) == 1:
         return (slice(0, min(shape[0], max_elements)),)
     
-    # For multi-dimensional, take a hypercube from the start
+    # For multidimensional, take a hypercube from the start
     # Calculate how many elements per dimension (geometric mean approach)
     import math
     ndim = len(shape)
@@ -288,7 +325,7 @@ def _compute_summary(data) -> Dict[str, Any]:
 
 def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
     """
-    Retrieve a slice of data from a dataset.
+    Retrieve a slice of data from a dataset or local variable.
     
     Parses Python-style slice syntax and enforces a maximum element limit
     to protect the LLM context window from huge data dumps.
@@ -298,18 +335,22 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
     show full data on request.
     
     Args:
-        path: Full path to dataset (e.g. '@public/examples/ds-1d.b2nd')
+        path: Server dataset path (e.g. '@public/examples/ds-1d.b2nd')
+              OR local variable name (e.g. 'my_data')
         slices: Python slice syntax (e.g. '0:100', '0:5, 0:3')
     
     Returns:
         Dict with slice metadata, summary, and data values, or 'error' on failure.
     """
-    print(f"→ Getting slice from dataset: '{path}'")
+    is_local = not path.startswith("@")
+    source_type = "local variable" if is_local else "server dataset"
+    
+    print(f"→ Getting slice from {source_type}: '{path}'")
     print(f"   Requested slice: {slices or '(default)'}")
     
     try:
-        dataset = _get_dataset(path)
-        shape = dataset.shape
+        resolved = resolve_data(path)
+        shape = resolved.shape
         
         # Parse or generate slice specification
         if slices is None:
@@ -333,22 +374,42 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
         print(f"   Slice tuple: {slice_tuple}")
         print(f"   Estimated elements: {estimated_size}")
         
-        # Fetch the data — __getitem__ returns numpy array
-        data = dataset[slice_tuple]
+        # Fetch the data
+        data = resolved[slice_tuple]
         data_json = _to_json_safe(data)
+        
+        # Generate variable name and register for notebook injection
+        # Only register if this is from server (local vars are already in namespace)
+        variable_name = None
+        if not is_local:
+            # Sanitize path to create a valid Python identifier
+            # '@public/examples/ds-3d.b2nd' → 'ds_3d'
+            base_name = path.split('/')[-1]  # Get filename
+            base_name = base_name.replace('.b2nd', '').replace('.b2frame', '')
+            base_name = base_name.replace('-', '_').replace('@', '').replace('.', '_')
+            variable_name = base_name
+            
+            register_fetched_object(variable_name, data)
+            print(f"   ✓ Registered as: '{variable_name}'")
         
         # Pre-compute summary for LLM presentation
         summary = _compute_summary(data)
         
         result = {
             "path": path,
+            "source": source_type,
             "dataset_shape": list(shape),
-            "dtype": str(dataset.dtype),
+            "dtype": str(resolved.dtype),
             "slice": slice_str_used,
             "result_shape": list(data.shape) if hasattr(data, 'shape') else [],
             "summary": summary,
             "data": data_json
         }
+        
+        # Include variable name if this was registered
+        if variable_name:
+            result["variable_name"] = variable_name
+            result["note"] = f"Data stored as '{variable_name}' in notebook. Use this name to reference it in other tools."
         
         # Hint for the LLM on how to present results
         if summary["num_elements"] > SUMMARY_THRESHOLD:
@@ -360,9 +421,9 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
         return result
     
     except ValueError as e:
-        # Slice parsing errors
-        print(f"   ✗ Invalid slice: {e}")
-        return {"error": f"Invalid slice specification: {e}"}
+        # Slice parsing errors or variable not found
+        print(f"   ✗ Error: {e}")
+        return {"error": str(e)}
     except Exception as e:
         print(f"   ✗ Failed: {e}")
         return {"error": f"Failed to get slice from '{path}': {e}"}
@@ -392,13 +453,13 @@ def where_filter(
     slices: str | None = None
 ) -> Dict[str, Any]:
     """
-    Filter dataset values based on a condition.
+    Filter dataset or local variable values based on a condition.
     
-    Applies a comparison (e.g., > 3000) to the dataset and returns:
+    Applies a comparison (e.g., > 3000) to the data and returns:
     - value_if_true where the condition is met
     - value_if_false where the condition is not met
     
-    This is implemented using numpy's where function on the fetched slice.
+    This is implemented using NumPy's where function on the fetched slice.
     The tool is stateless — it fetches data fresh each call. If you previously
     used get_slice on a region, pass the same slice here to filter that region.
     
@@ -408,7 +469,8 @@ def where_filter(
     - Binary classification: value > threshold → 1, else 0
     
     Args:
-        path: Full path to dataset (e.g. '@public/examples/ds-1d.b2nd')
+        path: Server dataset path (e.g. '@public/examples/ds-1d.b2nd')
+              OR local variable name (e.g. 'my_data')
         operator: Comparison operator (>, >=, <, <=, ==, !=)
         threshold: Value to compare against
         value_if_true: Value where condition is True (default: original data)
@@ -425,15 +487,18 @@ def where_filter(
                      f"Valid options: {list(COMPARISON_OPERATORS.keys())}"
         }
     
-    print(f"→ Filtering dataset: '{path}'")
+    is_local = not path.startswith("@")
+    source_type = "local variable" if is_local else "server dataset"
+    
+    print(f"→ Filtering {source_type}: '{path}'")
     print(f"   Condition: data {operator} {threshold}")
     print(f"   Values: if_true={value_if_true or 'data'}, if_false={value_if_false or 0}")
     if slices:
         print(f"   Slice: {slices}")
     
     try:
-        dataset = _get_dataset(path)
-        shape = dataset.shape
+        resolved = resolve_data(path)
+        shape = resolved.shape
         
         # Determine slice to apply (for size safety)
         if slices is None:
@@ -457,7 +522,7 @@ def where_filter(
         print(f"   Estimated elements: {estimated_size}")
         
         # Step 1: Get the data slice as numpy array
-        data_slice = dataset[slice_tuple]
+        data_slice = resolved[slice_tuple]
         
         # Step 2: Build the boolean condition
         compare_fn = COMPARISON_OPERATORS[operator]
@@ -475,6 +540,13 @@ def where_filter(
         # np.where(condition, x, y) returns x where True, y where False
         result_data = np.where(condition, v_true, v_false)
         
+        # Register for notebook injection (user can access as a variable)
+        # Use a descriptive path that includes the filter condition
+        # Only register if this is from server (local vars are already in namespace)
+        if not is_local:
+            filter_path = f"{path}[{operator}{threshold}]"
+            register_fetched_object(filter_path, result_data)
+        
         # Convert to JSON-safe format
         result_json = _to_json_safe(result_data)
         
@@ -488,8 +560,9 @@ def where_filter(
         
         result = {
             "path": path,
+            "source": source_type,
             "dataset_shape": list(shape),
-            "dtype": str(dataset.dtype),
+            "dtype": str(resolved.dtype),
             "condition": f"data {operator} {threshold}",
             "slice_applied": slice_str_used,
             "result_shape": list(result_data.shape),
@@ -515,9 +588,90 @@ def where_filter(
         return result
     
     except ValueError as e:
-        # Slice parsing errors
-        print(f"   ✗ Invalid slice: {e}")
-        return {"error": f"Invalid slice specification: {e}"}
+        # Slice parsing errors or variable not found
+        print(f"   ✗ Error: {e}")
+        return {"error": str(e)}
     except Exception as e:
         print(f"   ✗ Failed: {e}")
         return {"error": f"Failed to filter '{path}': {e}"}
+
+
+# ---------------------------------------------------------------------------
+# LOAD DATASET
+# ---------------------------------------------------------------------------
+
+def load_dataset(path: str) -> Dict[str, Any]:
+    """
+    Load an entire dataset into the notebook for manipulation.
+    
+    This is the explicit "I want all of this data" tool. It loads the complete
+    dataset (after decompression if from Caterva2) into memory as a numpy array.
+    
+    Safety: Enforces the same 10K element limit as get_slice. For larger datasets,
+    suggests using get_slice to fetch specific regions instead.
+    
+    Args:
+        path: Server dataset path (e.g. '@public/examples/ds-1d.b2nd')
+              OR local variable name (e.g. 'my_data')
+    
+    Returns:
+        Dict with dataset metadata, summary, and data values, or 'error' on failure.
+    """
+    from ._base import fetch_and_register_data
+    
+    is_local = not path.startswith("@")
+    source_type = "local variable" if is_local else "server dataset"
+    
+    print(f"→ Loading full {source_type}: '{path}'")
+    
+    try:
+        # Fetch the entire dataset with safety check
+        data, metadata = fetch_and_register_data(
+            path=path,
+            slice_spec=None,  # Full dataset
+            max_elements=MAX_SLICE_ELEMENTS
+        )
+        
+        print(f"   ✓ Loaded: shape={metadata['shape']}, dtype={metadata['dtype']}")
+        print(f"   Size: {metadata['size_mb']} MB ({data.size:,} elements)")
+        
+        if metadata['registered']:
+            print(f"   📦 Available in notebook for manipulation")
+        
+        # Convert to JSON-safe format
+        data_json = _to_json_safe(data)
+        
+        # Compute summary statistics
+        summary = _compute_summary(data)
+        
+        result = {
+            "status": "success",
+            "path": path,
+            "source": metadata['source'],
+            "shape": metadata['shape'],
+            "dtype": metadata['dtype'],
+            "size_bytes": metadata['size_bytes'],
+            "size_mb": metadata['size_mb'],
+            "num_elements": data.size,
+            "summary": summary,
+            "registered_in_notebook": metadata['registered']
+        }
+        
+        # Include full data if small enough for LLM context
+        if data.size <= SUMMARY_THRESHOLD:
+            result["data"] = data_json
+        else:
+            result["note"] = (
+                f"Data has {data.size} elements — showing summary only. "
+                f"Data is available in your notebook for direct manipulation."
+            )
+        
+        return result
+    
+    except ValueError as e:
+        # Size limit exceeded or variable not found
+        print(f"   ✗ Error: {e}")
+        return {"error": str(e)}
+    except Exception as e:
+        print(f"   ✗ Failed: {e}")
+        return {"error": f"Failed to load '{path}': {e}"}

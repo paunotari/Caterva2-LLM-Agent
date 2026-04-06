@@ -48,6 +48,7 @@ def _ensure_local_import_bootstrap() -> None:
 
 _ensure_local_import_bootstrap()
 from caterva2_agent.tools import analysis
+from caterva2_agent.tools._base import ResolvedData
 
 
 class _FakeDataset:
@@ -88,13 +89,18 @@ class _FakeDataset:
         return False
 
 
+def _make_resolved(fake_dataset):
+    """Helper to create a ResolvedData wrapping a fake dataset."""
+    return ResolvedData(fake_dataset, source='server', name='@test/data.b2nd')
+
+
 def test_get_dataset_stats_returns_default_stats(monkeypatch) -> None:
     # What this tests: default stats (min, max, mean, std) are returned when no stats list provided.
     # Why important: users expect sensible defaults without specifying every stat.
-    monkeypatch.setattr(analysis, "_get_dataset", lambda _path: _FakeDataset())
+    monkeypatch.setattr(analysis, "resolve_data", lambda _path: _make_resolved(_FakeDataset()))
     result = analysis.get_dataset_stats("@public/example.b2nd")
 
-    assert result["path"] == "@public/example.b2nd"
+    assert result["name"] == "@public/example.b2nd"
     assert result["shape"] == [1000]
     assert result["dtype"] == "int64"
     assert "stats" in result
@@ -114,7 +120,7 @@ def test_get_dataset_stats_returns_default_stats(monkeypatch) -> None:
 def test_get_dataset_stats_custom_stats_list(monkeypatch) -> None:
     # What this tests: only requested stats are computed and returned.
     # Why important: allows users to request specific stats without computing all.
-    monkeypatch.setattr(analysis, "_get_dataset", lambda _path: _FakeDataset())
+    monkeypatch.setattr(analysis, "resolve_data", lambda _path: _make_resolved(_FakeDataset()))
     result = analysis.get_dataset_stats(
         "@public/example.b2nd",
         stats=["sum", "var", "argmin"]
@@ -133,7 +139,7 @@ def test_get_dataset_stats_custom_stats_list(monkeypatch) -> None:
 def test_get_dataset_stats_invalid_stat_returns_error(monkeypatch) -> None:
     # What this tests: invalid stat names are rejected with clear error.
     # Why important: prevents silent failures or confusing exceptions.
-    monkeypatch.setattr(analysis, "_get_dataset", lambda _path: _FakeDataset())
+    monkeypatch.setattr(analysis, "resolve_data", lambda _path: _make_resolved(_FakeDataset()))
     result = analysis.get_dataset_stats(
         "@public/example.b2nd",
         stats=["min", "invalid_stat"]
@@ -147,7 +153,7 @@ def test_get_dataset_stats_invalid_stat_returns_error(monkeypatch) -> None:
 def test_get_dataset_stats_includes_metadata(monkeypatch) -> None:
     # What this tests: response includes shape, dtype, and axis for context.
     # Why important: LLM needs metadata to interpret stats correctly.
-    monkeypatch.setattr(analysis, "_get_dataset", lambda _path: _FakeDataset())
+    monkeypatch.setattr(analysis, "resolve_data", lambda _path: _make_resolved(_FakeDataset()))
     result = analysis.get_dataset_stats("@public/example.b2nd", axis=0)
 
     assert "shape" in result
