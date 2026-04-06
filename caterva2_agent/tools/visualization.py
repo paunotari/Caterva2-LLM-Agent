@@ -23,9 +23,8 @@ import numpy as np
 import plotly.graph_objects as go
 from scipy.ndimage import zoom
 
-from ._base import resolve_data, _to_json_safe
+from ._base import resolve_data
 from .data_access import _parse_slice_string
-
 
 # ---------------------------------------------------------------------------
 # CONSTANTS
@@ -82,7 +81,7 @@ VISUALIZATION_TOOLS = [
                     "colorscale": {
                         "type": "string",
                         "description": (
-                            "Colorscale name for heatmaps and volumes. "
+                            "colorscale name for heatmaps and volumes. "
                             "Options: 'Viridis', 'Plasma', 'Inferno', 'Greys', 'Blues', 'Hot', etc. "
                             "Default: 'Viridis'"
                         )
@@ -238,13 +237,8 @@ def _plot_3d_volume(
     # Create meshgrid (returns arrays of shape (nz, ny, nx))
     X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
     
-    # Normalize data to 0-1 range for opacity mapping
     data_min = np.nanmin(data)
     data_max = np.nanmax(data)
-    if data_max > data_min:
-        data_normalized = (data - data_min) / (data_max - data_min)
-    else:
-        data_normalized = np.zeros_like(data)
     
     fig = go.Figure()
     fig.add_trace(go.Volume(
@@ -254,8 +248,8 @@ def _plot_3d_volume(
         value=data.flatten(),
         isomin=data_min,
         isomax=data_max,
+        surface=dict(count=21),  # Render 21 isosurfaces across the value range for full volume effect
         opacity=opacity,
-        surface_count=20,  # Number of isosurfaces for volume effect
         colorscale=colorscale,
         colorbar=dict(title="Value"),
         caps=dict(x_show=False, y_show=False, z_show=False)  # Hide caps for cleaner look
@@ -311,10 +305,10 @@ def visualize_dataset(
     Returns:
         Dict with visualization status and metadata, or 'error' on failure.
     """
-    # Apply defaults
-    colorscale = colorscale or DEFAULT_COLORSCALE
-    opacity = opacity if opacity is not None else DEFAULT_OPACITY
-    max_size = max_size or DEFAULT_MAX_SIZE
+    # Apply defaults (explicit types for clarity)
+    colorscale_final: str = colorscale or DEFAULT_COLORSCALE
+    opacity_final: float = opacity if opacity is not None else DEFAULT_OPACITY
+    max_size_final: int = max_size or DEFAULT_MAX_SIZE
     
     is_local = not path.startswith("@")
     source_type = "local variable" if is_local else "server dataset"
@@ -336,7 +330,7 @@ def visualize_dataset(
         else:
             # For very large datasets, we need to be careful
             total_elements = np.prod(shape)
-            if total_elements > max_size * 10:
+            if total_elements > max_size_final * 10:
                 # Dataset is way too large to fetch entirely — require slices
                 return {
                     "error": f"Data has {total_elements:,} elements — too large to visualize directly. "
@@ -386,12 +380,14 @@ def visualize_dataset(
         downsampled = False
         zoom_factor = 1.0
         original_shape = data.shape
+        fig: go.Figure
+        viz_type: str
         
         if actual_ndim == 1:
             # 1D: Line plot
-            if data.size > max_size:
-                # Simple strided downsampling for 1D
-                stride = int(np.ceil(data.size / max_size))
+            if data.size > max_size_final:
+                # Simple downsampling for 1D
+                stride = int(np.ceil(data.size / max_size_final))
                 data = data[::stride]
                 downsampled = True
                 print(f"   Downsampled 1D: stride={stride}, new size={data.size}")
@@ -401,9 +397,9 @@ def visualize_dataset(
         
         elif actual_ndim == 2:
             # 2D: Heatmap
-            if data.size > max_size:
-                # Use zoom for 2D downsampling
-                zoom_factor = (max_size / data.size) ** 0.5
+            if data.size > max_size_final:
+                # Use Zoom for 2D downsampling
+                zoom_factor = (max_size_final / data.size) ** 0.5
                 data = zoom(data, zoom_factor, order=1)
                 downsampled = True
                 print(f"   Downsampled 2D: factor={zoom_factor:.3f}, new shape={data.shape}")
@@ -429,35 +425,40 @@ def visualize_dataset(
                     print(f"   Further downsampled 2D: new shape={data.shape}")
                     print(f"   Suggestion: Use slices to visualize a specific region-of-interest")
             
-            fig = _plot_2d(data, plot_title, colorscale)
+            fig = _plot_2d(data, plot_title, colorscale_final)
             viz_type = "heatmap"
         
         elif actual_ndim == 3:
             # 3D: Volume rendering
-            if data.size > max_size:
-                data, zoom_factor = _downsample_3d(data, max_size)
+            if data.size > max_size_final:
+                data, zoom_factor = _downsample_3d(data, max_size_final)
                 downsampled = True
                 print(f"   Downsampled 3D: factor={zoom_factor:.3f}, new shape={data.shape}")
             
-            fig = _plot_3d_volume(data, plot_title, colorscale, opacity)
+            fig = _plot_3d_volume(data, plot_title, colorscale_final, opacity_final)
             viz_type = "volume"
+        else:
+            # Fallback for unexpected dimensionality (should never reach here)
+            return {
+                "error": f"Unsupported dimensionality: {actual_ndim}D"
+            }
         
         # --- Display the figure ---
         fig.show()
         
         # --- Build response ---
-        result = {
+        result: Dict[str, Any] = {
             "status": "success",
             "visualization_type": viz_type,
             "path": path,
             "source": source_type,
             "original_shape": list(original_shape),
             "rendered_shape": list(data.shape),
-            "colorscale": colorscale,
+            "colorscale": colorscale_final,
         }
         
         if actual_ndim == 3:
-            result["opacity"] = opacity
+            result["opacity"] = opacity_final
         
         if downsampled:
             result["downsampled"] = True

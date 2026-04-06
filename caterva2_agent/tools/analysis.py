@@ -25,6 +25,9 @@ DEFAULT_STATS = ["min", "max", "mean", "std"]
 # All supported statistical operations
 SUPPORTED_STATS = {"min", "max", "mean", "sum", "std", "var", "argmin", "argmax", "any", "all"}
 
+# Supported reduction operations for collapse_dimensions
+SUPPORTED_REDUCTIONS = {"min", "max", "mean", "sum", "std", "var", "prod"}
+
 
 # ---------------------------------------------------------------------------
 # TOOL SCHEMAS
@@ -75,6 +78,69 @@ ANALYSIS_TOOLS = [
                     }
                 },
                 "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "collapse_dimensions",
+            "description": (
+                "Collapse a multi-dimensional dataset along one axis using an aggregation operation. "
+                "This reduces N-dimensional data to (N-1)-dimensional data. "
+                "CRITICAL for giant datasets: executes server-side on compressed Blosc2 data without downloading. "
+                "Common use cases: "
+                "- 3D tomography → 2D projection via max/mean/sum (medical imaging, microscopy) "
+                "- 4D climate data → 3D spatial map via time-averaging "
+                "- Point cloud density maps via spatial binning "
+                "The result is registered in the notebook for visualization or further analysis. "
+                "Works with both server datasets (@path) and local variables (variable_name)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Server dataset path (e.g. '@public/examples/ds-3d.b2nd') "
+                            "OR local variable name (e.g. 'volume_data'). "
+                            "Use '@' prefix for server datasets, plain name for local variables."
+                        )
+                    },
+                    "axis": {
+                        "type": "integer",
+                        "description": (
+                            "Axis along which to collapse the data (0-indexed). "
+                            "For a 3D array with shape (100, 200, 300): "
+                            "- axis=0 collapses the first dimension → result shape (200, 300) "
+                            "- axis=1 collapses the second dimension → result shape (100, 300) "
+                            "- axis=2 collapses the third dimension → result shape (100, 200)"
+                        )
+                    },
+                    "operation": {
+                        "type": "string",
+                        "enum": ["max", "mean", "sum", "min", "std", "var", "prod"],
+                        "description": (
+                            "Aggregation operation to apply: "
+                            "- 'max': Maximum value along axis (max-intensity projection for tomographies) "
+                            "- 'mean': Average value along axis (reduces noise, shows typical structure) "
+                            "- 'sum': Sum along axis (useful for counting, density maps) "
+                            "- 'min': Minimum value along axis "
+                            "- 'std': Standard deviation along axis (shows variability) "
+                            "- 'var': Variance along axis "
+                            "- 'prod': Product along axis"
+                        )
+                    },
+                    "variable_name": {
+                        "type": "string",
+                        "description": (
+                            "Optional name for storing the result in the notebook namespace. "
+                            "If not provided, auto-generates from path and operation (e.g. 'ds_3d_max_axis2'). "
+                            "Use descriptive names like 'tomo_mip' or 'time_averaged_temp'."
+                        )
+                    }
+                },
+                "required": ["path", "axis", "operation"]
             }
         }
     },
@@ -163,3 +229,145 @@ def get_dataset_stats(
     except Exception as e:
         print(f"   ✗ Failed: {e}")
         return {"error": f"Failed to compute stats for '{path}': {e}"}
+
+
+def collapse_dimensions(
+    path: str,
+    axis: int,
+    operation: str,
+    variable_name: str | None = None
+) -> Dict[str, Any]:
+    """
+    Collapse a multi-dimensional dataset along one axis using aggregation.
+    
+    This is THE key operation for exploring giant datasets — it executes
+    server-side on Blosc2 compressed data, reducing dimensionality without
+    downloading the full dataset.
+    
+    Common workflows:
+    - 3D tomography → 2D max-intensity projection (medical imaging)
+    - 4D climate data (time, lat, lon, alt) → 3D spatial average
+    - Density maps via summing along spatial dimensions
+    
+    The result is automatically registered in the notebook namespace for
+    visualization or further manipulation.
+    
+    Args:
+        path: Server dataset path (e.g. '@public/examples/ds-3d.b2nd')
+              OR local variable name (e.g. 'my_volume')
+        axis: Which axis to collapse (0-indexed). For shape (100, 200, 300):
+              axis=0 → result shape (200, 300)
+              axis=1 → result shape (100, 300)
+              axis=2 → result shape (100, 200)
+        operation: Aggregation to apply: max, mean, sum, min, std, var, prod
+        variable_name: Optional custom name for notebook storage. If None,
+                      auto-generates like 'ds_3d_max_axis2'
+    
+    Returns:
+        Dict with result metadata and storage info, or 'error' on failure.
+    """
+    # Validate operation
+    if operation not in SUPPORTED_REDUCTIONS:
+        return {
+            "error": f"Unsupported operation: '{operation}'. "
+                    f"Valid options: {sorted(SUPPORTED_REDUCTIONS)}"
+        }
+    
+    source_type = "local variable" if not path.startswith('@') else "server dataset"
+    print(f"→ Collapsing {source_type}: '{path}'")
+    print(f"   Operation: {operation} along axis={axis}")
+    
+    try:
+        from ._base import register_fetched_object
+        
+        resolved = resolve_data(path)
+        data = resolved.data
+        shape = resolved.shape
+        ndim = len(shape)
+        
+        # Validate axis bounds
+        if axis < 0 or axis >= ndim:
+            return {
+                "error": f"Invalid axis={axis} for {ndim}D array. "
+                        f"Valid range: 0 to {ndim - 1}",
+                "shape": list(shape)
+            }
+        
+        print(f"   Input shape: {shape}, ndim: {ndim}")
+        
+        # Execute the reduction
+        # For server datasets, this executes server-side on Blosc2
+        # For local arrays, uses numpy
+        if resolved.is_local():
+            # Local numpy array
+            reduction_func = getattr(np, operation)
+            result_array = reduction_func(data, axis=axis)
+        else:
+            # Server dataset - use native Caterva2 methods
+            method = getattr(data, operation)
+            result_array = method(axis=axis)
+        
+        # Convert to numpy for consistency (if not already)
+        result_array = np.asarray(result_array)
+        result_shape = result_array.shape
+        result_size = result_array.size
+        
+        print(f"   Result shape: {result_shape}, size: {result_size:,} elements")
+        
+        # Auto-generate variable name if not provided
+        if variable_name is None:
+            # Extract base name from path
+            if path.startswith('@'):
+                # '@public/dir/ds-3d.b2nd' → 'ds_3d'
+                base_name = path.split('/')[-1].replace('.b2nd', '').replace('.b2frame', '')
+                base_name = base_name.replace('-', '_')
+            else:
+                # 'my_data' → 'my_data'
+                base_name = path.replace('-', '_')
+            
+            variable_name = f"{base_name}_{operation}_axis{axis}"
+        
+        # Sanitize variable name (remove special characters)
+        variable_name = variable_name.replace('@', '').replace('/', '_').replace('.', '_')
+        
+        # Register in notebook namespace
+        register_fetched_object(variable_name, result_array)
+        
+        print(f"   ✓ Stored as: '{variable_name}'")
+        
+        # Build response
+        result = {
+            "status": "success",
+            "operation": operation,
+            "axis_collapsed": axis,
+            "source_path": path,
+            "source_shape": list(shape),
+            "result_shape": list(result_shape),
+            "result_size": int(result_size),
+            "variable_name": variable_name,
+            "dtype": str(result_array.dtype),
+            "data_range": {
+                "min": _to_json_safe(np.min(result_array)),
+                "max": _to_json_safe(np.max(result_array))
+            },
+            "note": (
+                f"Result stored as '{variable_name}' in notebook. "
+                f"Reduced {ndim}D → {len(result_shape)}D via {operation} along axis {axis}. "
+                f"Use visualize_dataset('{variable_name}') to plot."
+            )
+        }
+        
+        # Include a sample of the data if it's small enough
+        if result_size <= 100:
+            result["preview"] = _to_json_safe(result_array)
+        
+        return result
+    
+    except ValueError as e:
+        print(f"   ✗ {e}")
+        return {"error": str(e)}
+    except Exception as e:
+        print(f"   ✗ Failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"error": f"Failed to collapse '{path}': {e}"}
