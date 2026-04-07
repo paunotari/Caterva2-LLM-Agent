@@ -7,12 +7,15 @@ Tools in this module:
 - get_dataset_info: Get metadata for a specific dataset or local variable
 """
 
+import logging
 from typing import Dict, Any
 
 import numpy as np
 
 from ._base import _get_client, get_notebook_namespace
 from caterva2_agent.config import CATERVA2_URLBASE
+
+logger = logging.getLogger('caterva2_agent')
 
 
 # ---------------------------------------------------------------------------
@@ -115,15 +118,15 @@ def list_roots() -> Dict[str, Any]:
     Returns:
         Dict with 'roots' key (list of root name strings), or 'error' on failure.
     """
-    print("→ Listing available roots on the Caterva2 server")
-    print("   API: client.get_roots()")
+    logger.info("Listing available roots on the Caterva2 server")
+    logger.debug("API: client.get_roots()")
     try:
         client = _get_client()
         roots_dict = client.get_roots()
         # get_roots() returns {name: {"name": name}, ...} — we extract just the names
         return {"roots": sorted(roots_dict.keys())}
     except Exception as e:
-        print("   ✗ Failed")
+        logger.error(f"Failed to list roots: {e}")
         return {"error": f"Failed to connect to Caterva2 server at {CATERVA2_URLBASE}: {e}"}
 
 
@@ -145,8 +148,8 @@ def list_datasets(path: str, limit: int = 50, offset: int = 0) -> Dict[str, Any]
         Dict with 'datasets' (one page), 'total', 'offset', and 'has_more',
         or 'error' on failure.
     """
-    print(f"→ Listing datasets under path: '{path}' (offset={offset}, limit={limit})")
-    print(f"   API: client.get_list('{path}')")
+    logger.info(f"Listing datasets under path: '{path}' (offset={offset}, limit={limit})")
+    logger.debug(f"API: client.get_list('{path}')")
     try:
         client = _get_client()
         datasets = client.get_list(path)
@@ -162,7 +165,7 @@ def list_datasets(path: str, limit: int = 50, offset: int = 0) -> Dict[str, Any]
             "has_more": (offset + limit) < total,
         }
     except Exception as e:
-        print("   ✗ Failed")
+        logger.error(f"Failed to list datasets: {e}")
         return {"error": f"Failed to list datasets at path '{path}': {e}"}
 
 
@@ -184,20 +187,23 @@ def get_dataset_info(path: str) -> Dict[str, Any]:
     
     if is_local:
         # --- Local variable: basic numpy info ---
-        print(f"→ Fetching info for local variable: '{path}'")
+        logger.info(f"Fetching info for local variable: '{path}'")
         
         try:
             namespace = get_notebook_namespace()
             if namespace is None:
+                logger.warning(f"No notebook namespace available for variable '{path}'")
                 return {"error": f"No notebook namespace available. Cannot access local variable '{path}'."}
-            
+
             if path not in namespace:
+                logger.warning(f"Local variable '{path}' not found in notebook namespace")
                 return {"error": f"Local variable '{path}' not found in notebook namespace."}
-            
+
             obj = namespace[path]
-            
+
             # Ensure it's array-like
             if not hasattr(obj, 'shape'):
+                logger.warning(f"Variable '{path}' is not array-like (type: {type(obj).__name__})")
                 return {"error": f"Variable '{path}' is not array-like (no shape attribute)."}
             
             arr = np.asarray(obj)
@@ -223,13 +229,13 @@ def get_dataset_info(path: str) -> Dict[str, Any]:
             return {"path": path, "info": info}
         
         except Exception as e:
-            print(f"   ✗ Failed: {e}")
+            logger.error(f"Failed to get metadata for local variable '{path}': {e}")
             return {"error": f"Failed to get info for local variable '{path}': {e}"}
     
     else:
         # --- Server dataset: full metadata via Caterva2 API ---
-        print(f"→ Fetching metadata for server dataset: '{path}'")
-        print(f"   API: client.get_info('{path}')")
+        logger.info(f"Fetching metadata for server dataset: '{path}'")
+        logger.debug(f"API: client.get_info('{path}')")
         
         try:
             client = _get_client()
@@ -240,5 +246,5 @@ def get_dataset_info(path: str) -> Dict[str, Any]:
             safe_info["source"] = "server dataset"
             return {"path": path, "info": safe_info}
         except Exception as e:
-            print("   ✗ Failed")
+            logger.error(f"Failed to get dataset info for '{path}': {e}")
             return {"error": f"Failed to get info for server dataset '{path}': {e}"}

@@ -12,6 +12,8 @@ Works with both:
 from typing import Dict, Any
 import numpy as np
 
+logger = logging.getLogger('caterva2_agent')
+
 from ._base import resolve_data, _to_json_safe
 
 
@@ -157,6 +159,8 @@ def get_dataset_stats(
     axis: int | None = None
 ) -> Dict[str, Any]:
     """
+import logging
+
     Compute statistical summaries for a dataset or local variable.
 
     Groups multiple stats in one call for efficiency — avoids separate network
@@ -180,11 +184,12 @@ def get_dataset_stats(
     
     invalid_stats = set(stats_list) - SUPPORTED_STATS
     if invalid_stats:
+        logger.warning(f"Unsupported statistics requested: {invalid_stats}")
         return {"error": f"Unsupported statistics: {invalid_stats}. Valid options: {SUPPORTED_STATS}"}
 
     source_type = "local variable" if not path.startswith('@') else "server dataset"
-    print(f"→ Computing stats for {source_type}: '{path}'")
-    print(f"   Stats: {stats_list}, axis: {axis}")
+    logger.info(f"Computing stats for {source_type}: '{path}'")
+    logger.debug(f"Stats: {stats_list}, axis: {axis}")
 
     try:
         resolved = resolve_data(path)
@@ -224,10 +229,10 @@ def get_dataset_stats(
 
     except ValueError as e:
         # Variable not found or not array-like
-        print(f"   ✗ {e}")
+        logger.warning(f"Stats validation error for '{path}': {e}")
         return {"error": str(e)}
     except Exception as e:
-        print(f"   ✗ Failed: {e}")
+        logger.error(f"Failed to compute stats for '{path}': {e}")
         return {"error": f"Failed to compute stats for '{path}': {e}"}
 
 
@@ -274,8 +279,8 @@ def collapse_dimensions(
         }
     
     source_type = "local variable" if not path.startswith('@') else "server dataset"
-    print(f"→ Collapsing {source_type}: '{path}'")
-    print(f"   Operation: {operation} along axis={axis}")
+    logger.info(f"Collapsing {source_type}: '{path}'")
+    logger.debug(f"Operation: {operation} along axis={axis}")
     
     try:
         from ._base import register_fetched_object
@@ -293,7 +298,7 @@ def collapse_dimensions(
                 "shape": list(shape)
             }
         
-        print(f"   Input shape: {shape}, ndim: {ndim}")
+        logger.debug(f"Input shape: {shape}, ndim: {ndim}")
         
         # Calculate expected output size
         expected_shape = list(shape)
@@ -346,7 +351,7 @@ def collapse_dimensions(
         result_shape = result_array.shape
         result_size = result_array.size
         
-        print(f"   Result shape: {result_shape}, size: {result_size:,} elements")
+        logger.debug(f"Result shape: {result_shape}, size: {result_size:,} elements")
         
         # Auto-generate variable name if not provided
         if variable_name is None:
@@ -367,7 +372,7 @@ def collapse_dimensions(
         # Register in notebook namespace
         register_fetched_object(variable_name, result_array)
         
-        print(f"   ✓ Stored as: '{variable_name}'")
+        logger.debug(f"✓ Stored as: '{variable_name}'")
         
         # Build response
         result = {
@@ -398,10 +403,10 @@ def collapse_dimensions(
         return result
     
     except ValueError as e:
-        print(f"   ✗ {e}")
+        logger.warning(f"Collapse validation error for '{path}': {e}")
         return {"error": str(e)}
     except Exception as e:
-        print(f"   ✗ Failed: {e}")
+        logger.error(f"Failed to collapse '{path}': {e}")
         import traceback
         traceback.print_exc()
         return {"error": f"Failed to collapse '{path}': {e}"}

@@ -161,7 +161,6 @@ class Agent:
             if hasattr(response, "usage"):
                 tokens_this_call = response.usage.total_tokens
                 self.total_tokens_used += tokens_this_call
-                print(f"[Iteration {iteration}: {tokens_this_call} tokens | {self.total_tokens_used} total]")
                 logger.info(f"Iteration {iteration}: {tokens_this_call} tokens | {self.total_tokens_used} total")
 
             assistant_message = response.choices[0].message
@@ -222,4 +221,3 @@ class Agent:
         self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         self.total_tokens_used = 0
         logger.info("Conversation and token counter reset")
-        print("[Conversation and token counter reset]")

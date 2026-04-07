@@ -23,6 +23,8 @@ from typing import Dict, Any
 import base64
 from io import BytesIO
 
+logger = logging.getLogger('caterva2_agent')
+
 import numpy as np
 import plotly.graph_objects as go
 from scipy.ndimage import zoom
@@ -203,6 +205,8 @@ VISUALIZATION_TOOLS = [
 
 def _downsample_3d(data: np.ndarray, max_elements: int) -> tuple[np.ndarray, float]:
     """
+import logging
+
     Downsample a 3D array to fit within max_elements while preserving aspect ratio.
     
     Uses scipy.ndimage.zoom for smooth interpolation.
@@ -393,20 +397,20 @@ def visualize_dataset(
     is_local = not path.startswith("@")
     source_type = "local variable" if is_local else "server dataset"
     
-    print(f"→ Visualizing {source_type}: '{path}'")
+    logger.info(f"Visualizing {source_type}: '{path}'")
     
     try:
         resolved = resolve_data(path)
         shape = resolved.shape
         ndim = len(shape)
         
-        print(f"   Shape: {shape}, dtype: {resolved.dtype}")
+        logger.debug(f"Shape: {shape}, dtype: {resolved.dtype}")
         
         # --- Apply slices if provided ---
         if slices:
             slice_tuple = _parse_slice_string(slices, shape)
             data = resolved[slice_tuple]
-            print(f"   Applied slice: {slices} → shape {data.shape}")
+            logger.debug(f"Applied slice: {slices} → shape {data.shape}")
         else:
             # For very large datasets, we need to be careful
             total_elements = np.prod(shape)
@@ -443,16 +447,16 @@ def visualize_dataset(
         data = np.asarray(data)
         actual_ndim = data.ndim
         
-        print(f"   Data to visualize: shape={data.shape}, ndim={actual_ndim}, dtype={data.dtype}")
+        logger.debug(f"Data to visualize: shape={data.shape}, ndim={actual_ndim}, dtype={data.dtype}")
         
         # Handle structured/compound dtypes — extract first field
         if data.dtype.names is not None:
             # Structured array with multiple fields
             first_field = data.dtype.names[0]
-            print(f"   Structured dtype detected with fields: {data.dtype.names}")
-            print(f"   Extracting field '{first_field}' for visualization")
+            logger.debug(f"Structured dtype detected with fields: {data.dtype.names}")
+            logger.debug(f"Extracting field '{first_field}' for visualization")
             data = data[first_field]
-            print(f"   After extraction: shape={data.shape}, dtype={data.dtype}")
+            logger.debug(f"After extraction: shape={data.shape}, dtype={data.dtype}")
         
         # NOTE: Visualization does NOT inject data into notebook namespace.
         # This is intentional — visualization is for viewing, not working with data.
@@ -488,7 +492,7 @@ def visualize_dataset(
                 stride = int(np.ceil(data.size / max_size_final))
                 data = data[::stride]
                 downsampled = True
-                print(f"   Downsampled 1D: stride={stride}, new size={data.size}")
+                logger.debug(f"Downsampled 1D: stride={stride}, new size={data.size}")
             
             fig = _plot_1d(data, plot_title, path)
             viz_type = "line_plot"
@@ -500,12 +504,12 @@ def visualize_dataset(
                 zoom_factor = (max_size_final / data.size) ** 0.5
                 data = zoom(data, zoom_factor, order=1)
                 downsampled = True
-                print(f"   Downsampled 2D: factor={zoom_factor:.3f}, new shape={data.shape}")
+                logger.debug(f"Downsampled 2D: factor={zoom_factor:.3f}, new shape={data.shape}")
             
             # Further downsample if aspect ratio is still extreme (for interactive performance)
             aspect_ratio = max(data.shape) / min(data.shape)
             if aspect_ratio > 100:
-                print(f"   ⚠ Extreme aspect ratio ({data.shape[0]} × {data.shape[1]}), further downsampling...")
+                logger.debug(f"⚠ Extreme aspect ratio ({data.shape[0]} × {data.shape[1]}), further downsampling...")
                 # Aggressively downsample the long dimension to ~1000 pixels max
                 max_long_dim = 1000
                 if max(data.shape) > max_long_dim:
@@ -520,8 +524,8 @@ def visualize_dataset(
                         data = data[::stride, :]
                     
                     downsampled = True
-                    print(f"   Further downsampled 2D: new shape={data.shape}")
-                    print(f"   Suggestion: Use slices to visualize a specific region-of-interest")
+                    logger.debug(f"Further downsampled 2D: new shape={data.shape}")
+                    logger.debug(f"Suggestion: Use slices to visualize a specific region-of-interest")
             
             fig = _plot_2d(data, plot_title, colorscale_final)
             viz_type = "heatmap"
@@ -531,7 +535,7 @@ def visualize_dataset(
             if data.size > max_size_final:
                 data, zoom_factor = _downsample_3d(data, max_size_final)
                 downsampled = True
-                print(f"   Downsampled 3D: factor={zoom_factor:.3f}, new shape={data.shape}")
+                logger.debug(f"Downsampled 3D: factor={zoom_factor:.3f}, new shape={data.shape}")
             
             fig = _plot_3d_volume(data, plot_title, colorscale_final, opacity_final)
             viz_type = "volume"
@@ -573,10 +577,10 @@ def visualize_dataset(
         return result
     
     except ValueError as e:
-        print(f"   ✗ Error: {e}")
+        logger.warning(f"Visualization validation error for '{path}': {e}")
         return {"error": str(e)}
     except Exception as e:
-        print(f"   ✗ Failed: {e}")
+        logger.error(f"Failed to visualize '{path}': {e}")
         return {"error": f"Failed to visualize '{path}': {e}"}
 
 
@@ -631,9 +635,9 @@ def render_projection(
     colormap_final = colormap or 'viridis'
     
     source_type = "local variable" if not path.startswith('@') else "server dataset"
-    print(f"→ Rendering projection of {source_type}: '{path}'")
-    print(f"   Operation: {operation} along axis={axis}")
-    print(f"   Colormap: {colormap_final}")
+    logger.info(f"Rendering projection of {source_type}: '{path}'")
+    logger.debug(f"Operation: {operation} along axis={axis}")
+    logger.debug(f"Colormap: {colormap_final}")
     
     try:
         # Step 1: Collapse dimension using existing tool
@@ -654,7 +658,7 @@ def render_projection(
         var_name = collapse_result["variable_name"]
         data_2d = fetched[var_name]
         
-        print(f"   Collapsed to 2D: {data_2d.shape}")
+        logger.debug(f"Collapsed to 2D: {data_2d.shape}")
         
         # Step 2: Downsample if needed for reasonable image size
         original_shape = data_2d.shape
@@ -667,7 +671,7 @@ def render_projection(
             zoom_factor = min(zoom_h, zoom_w)
             
             data_2d = zoom(data_2d, zoom_factor, order=1)  # Bilinear interpolation
-            print(f"   Downsampled for rendering: {original_shape} → {data_2d.shape}")
+            logger.debug(f"Downsampled for rendering: {original_shape} → {data_2d.shape}")
         else:
             zoom_factor = 1.0
         
@@ -703,13 +707,13 @@ def render_projection(
         image_base64 = base64.b64encode(buffer.read()).decode('utf-8')
         image_data_uri = f"data:image/png;base64,{image_base64}"
         
-        print(f"   ✓ Rendered as {data_2d.shape[1]}×{data_2d.shape[0]} PNG")
+        logger.debug(f"✓ Rendered as {data_2d.shape[1]}×{data_2d.shape[0]} PNG")
         
         # Display in notebook if running in IPython
         try:
             from IPython.display import display
             display(IPythonImage(data=base64.b64decode(image_base64)))
-            print("   ✓ Displayed in notebook")
+            logger.debug("✓ Displayed in notebook")
         except:
             # Not in IPython environment, skip display
             pass
@@ -744,10 +748,10 @@ def render_projection(
         return result
     
     except ValueError as e:
-        print(f"   ✗ {e}")
+        logger.warning(f"Projection validation error for '{path}': {e}")
         return {"error": str(e)}
     except Exception as e:
-        print(f"   ✗ Failed: {e}")
+        logger.error(f"Failed to render projection for '{path}': {e}")
         import traceback
         traceback.print_exc()
         return {"error": f"Failed to render projection for '{path}': {e}"}

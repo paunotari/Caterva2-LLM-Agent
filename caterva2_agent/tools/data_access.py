@@ -13,6 +13,8 @@ Works with both:
 
 from typing import Dict, Any
 
+logger = logging.getLogger('caterva2_agent')
+
 from ._base import resolve_data, _to_json_safe, register_fetched_object, fetch_and_register_data
 
 
@@ -176,6 +178,8 @@ DATA_ACCESS_TOOLS = [
 
 def _parse_slice_string(slice_str: str, shape: tuple) -> tuple:
     """
+import logging
+
     Parse a Python-style slice string into a tuple of slice objects.
     
     Examples:
@@ -345,8 +349,8 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
     is_local = not path.startswith("@")
     source_type = "local variable" if is_local else "server dataset"
     
-    print(f"→ Getting slice from {source_type}: '{path}'")
-    print(f"   Requested slice: {slices or '(default)'}")
+    logger.info(f"Getting slice from {source_type}: '{path}'")
+    logger.debug(f"Requested slice: {slices or '(default)'}")
     
     try:
         resolved = resolve_data(path)
@@ -371,8 +375,8 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
                 "requested_slice": slice_str_used
             }
         
-        print(f"   Slice tuple: {slice_tuple}")
-        print(f"   Estimated elements: {estimated_size}")
+        logger.debug(f"Slice tuple: {slice_tuple}")
+        logger.debug(f"Estimated elements: {estimated_size}")
         
         # Fetch the data
         data = resolved[slice_tuple]
@@ -390,7 +394,7 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
             variable_name = base_name
             
             register_fetched_object(variable_name, data)
-            print(f"   ✓ Registered as: '{variable_name}'")
+            logger.debug(f"✓ Registered as: '{variable_name}'")
         
         # Pre-compute summary for LLM presentation
         summary = _compute_summary(data)
@@ -422,10 +426,10 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
     
     except ValueError as e:
         # Slice parsing errors or variable not found
-        print(f"   ✗ Error: {e}")
+        logger.warning(f"Slice validation error for '{path}': {e}")
         return {"error": str(e)}
     except Exception as e:
-        print(f"   ✗ Failed: {e}")
+        logger.error(f"Failed to get slice from '{path}': {e}")
         return {"error": f"Failed to get slice from '{path}': {e}"}
 
 
@@ -490,11 +494,11 @@ def where_filter(
     is_local = not path.startswith("@")
     source_type = "local variable" if is_local else "server dataset"
     
-    print(f"→ Filtering {source_type}: '{path}'")
-    print(f"   Condition: data {operator} {threshold}")
-    print(f"   Values: if_true={value_if_true or 'data'}, if_false={value_if_false or 0}")
+    logger.info(f"Filtering {source_type}: '{path}'")
+    logger.debug(f"Condition: data {operator} {threshold}")
+    logger.debug(f"Values: if_true={value_if_true or 'data'}, if_false={value_if_false or 0}")
     if slices:
-        print(f"   Slice: {slices}")
+        logger.debug(f"Slice: {slices}")
     
     try:
         resolved = resolve_data(path)
@@ -519,7 +523,7 @@ def where_filter(
                 "requested_slice": slice_str_used
             }
         
-        print(f"   Estimated elements: {estimated_size}")
+        logger.debug(f"Estimated elements: {estimated_size}")
         
         # Step 1: Get the data slice as numpy array
         data_slice = resolved[slice_tuple]
@@ -589,10 +593,10 @@ def where_filter(
     
     except ValueError as e:
         # Slice parsing errors or variable not found
-        print(f"   ✗ Error: {e}")
+        logger.warning(f"Slice validation error for '{path}': {e}")
         return {"error": str(e)}
     except Exception as e:
-        print(f"   ✗ Failed: {e}")
+        logger.error(f"Failed to filter '{path}': {e}")
         return {"error": f"Failed to filter '{path}': {e}"}
 
 
@@ -622,7 +626,7 @@ def load_dataset(path: str) -> Dict[str, Any]:
     is_local = not path.startswith("@")
     source_type = "local variable" if is_local else "server dataset"
     
-    print(f"→ Loading full {source_type}: '{path}'")
+    logger.info(f"Loading full {source_type}: '{path}'")
     
     try:
         # Fetch the entire dataset with safety check
@@ -632,11 +636,11 @@ def load_dataset(path: str) -> Dict[str, Any]:
             max_elements=MAX_SLICE_ELEMENTS
         )
         
-        print(f"   ✓ Loaded: shape={metadata['shape']}, dtype={metadata['dtype']}")
-        print(f"   Size: {metadata['size_mb']} MB ({data.size:,} elements)")
+        logger.debug(f"✓ Loaded: shape={metadata['shape']}, dtype={metadata['dtype']}")
+        logger.debug(f"Size: {metadata['size_mb']} MB ({data.size:,} elements)")
         
         if metadata['registered']:
-            print(f"   📦 Available in notebook for manipulation")
+            logger.debug(f"📦 Available in notebook for manipulation")
         
         # Convert to JSON-safe format
         data_json = _to_json_safe(data)
@@ -670,8 +674,8 @@ def load_dataset(path: str) -> Dict[str, Any]:
     
     except ValueError as e:
         # Size limit exceeded or variable not found
-        print(f"   ✗ Error: {e}")
+        logger.warning(f"Load validation error for '{path}': {e}")
         return {"error": str(e)}
     except Exception as e:
-        print(f"   ✗ Failed: {e}")
+        logger.error(f"Failed to load '{path}': {e}")
         return {"error": f"Failed to load '{path}': {e}"}
