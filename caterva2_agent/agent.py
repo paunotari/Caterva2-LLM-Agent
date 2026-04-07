@@ -39,7 +39,7 @@ _handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger('caterva2_agent')
 logger.setLevel(logging.DEBUG)
 logger.addHandler(_handler)
-logger.propagate = False  # Don't bubble up to root logger
+logger.propagate = True  # Let root logger handle console output for JupyterLab
 
 def _run_tool(tool_call) -> tuple:
     """
