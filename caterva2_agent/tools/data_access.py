@@ -11,6 +11,7 @@ Works with both:
 - Local variables (referenced by name)
 """
 
+import logging
 from typing import Dict, Any
 
 logger = logging.getLogger('caterva2_agent')
@@ -178,8 +179,6 @@ DATA_ACCESS_TOOLS = [
 
 def _parse_slice_string(slice_str: str, shape: tuple) -> tuple:
     """
-import logging
-
     Parse a Python-style slice string into a tuple of slice objects.
     
     Examples:

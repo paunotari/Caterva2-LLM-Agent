@@ -9,6 +9,7 @@ Works with both:
 - Local variables (referenced by name)
 """
 
+import logging
 from typing import Dict, Any
 import numpy as np
 
@@ -159,8 +160,6 @@ def get_dataset_stats(
     axis: int | None = None
 ) -> Dict[str, Any]:
     """
-import logging
-
     Compute statistical summaries for a dataset or local variable.
 
     Groups multiple stats in one call for efficiency — avoids separate network

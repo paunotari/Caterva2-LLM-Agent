@@ -19,6 +19,7 @@ Works with both:
 - Local variables (referenced by name)
 """
 
+import logging
 from typing import Dict, Any
 import base64
 from io import BytesIO
@@ -205,8 +206,6 @@ VISUALIZATION_TOOLS = [
 
 def _downsample_3d(data: np.ndarray, max_elements: int) -> tuple[np.ndarray, float]:
     """
-import logging
-
     Downsample a 3D array to fit within max_elements while preserving aspect ratio.
     
     Uses scipy.ndimage.zoom for smooth interpolation.
