@@ -10,7 +10,6 @@ This module provides a cell-based interaction model where:
 Key functions:
 - ask(message): Send a question to the agent, display response
 - reset(): Clear agent memory (start fresh conversation)
-- history(): Display conversation history
 - variables(): List agent-injected variables
 
 Variable Reference Syntax:
@@ -403,49 +402,6 @@ def reset() -> None:
         print("🔄 Agent memory reset. Start a new conversation.")
     else:
         print("🔄 No active agent to reset.")
-
-
-def history() -> None:
-    """
-    Display the conversation history.
-    
-    Shows all messages exchanged with the agent in the current session.
-    Tool calls and results are summarized for readability.
-    """
-    agent = _get_agent()
-    
-    if len(agent.messages) <= 1:  # Only system prompt
-        print("No conversation history yet. Use ask() to start.")
-        return
-    
-    print("=" * 60)
-    print("CONVERSATION HISTORY")
-    print("=" * 60)
-    
-    for msg in agent.messages[1:]:  # Skip system prompt
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
-        
-        if role == "user":
-            print(f"\n👤 You: {content}")
-        elif role == "assistant":
-            if msg.get("tool_calls"):
-                tool_names = [tc.get("function", {}).get("name", "?") 
-                              for tc in msg.get("tool_calls", [])]
-                print(f"\n🤖 Agent: [Called tools: {', '.join(tool_names)}]")
-            if content:
-                # Truncate long responses for display
-                if len(content) > 500:
-                    content = content[:500] + "..."
-                print(f"\n🤖 Agent: {content}")
-        elif role == "tool":
-            tool_name = msg.get("name", "unknown")
-            # Don't show full tool results — too verbose
-            print(f"   └─ Tool result from {tool_name}")
-    
-    print("\n" + "=" * 60)
-    print(f"Token usage: {agent.total_tokens_used:,} / {agent.max_total_tokens:,}")
-    print("=" * 60)
 
 
 def variables() -> None:
