@@ -413,15 +413,18 @@ def variables() -> None:
     injected = list_injected_variables()
     
     if not injected:
-        print("No variables injected yet. Use ask() to fetch some data.")
+        _display_response("No variables injected yet. Use `ask()` to fetch some data.")
         return
-    
-    print("📊 Agent-injected variables:")
-    print("-" * 40)
-    for name, desc in injected.items():
-        print(f"  {name}: {desc}")
-    print("-" * 40)
-    print("You can use these in your own code.")
+
+    rows = "\n".join(f"| `{name}` | {desc} |" for name, desc in injected.items())
+    md = (
+        "### 📊 Agent-injected variables\n\n"
+        "| Variable | Description |\n"
+        "|---|---|\n"
+        f"{rows}\n\n"
+        "You can use these in your own code."
+    )
+    _display_response(md)
 
 
 # ---------------------------------------------------------------------------

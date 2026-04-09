@@ -11,12 +11,12 @@ The loop works as follows:
 
 import json
 import logging
+import os
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import RotatingFileHandler
 from typing import Any
-import os
 
 from caterva2_agent.config import client, MODEL_NAME, SYSTEM_PROMPT
 from caterva2_agent.tools import TOOLS, execute_tool
@@ -32,14 +32,22 @@ except NameError:
     LOGS_DIR = os.path.join(os.getcwd(), 'logs')
     os.makedirs(LOGS_DIR, exist_ok=True)
     LOG_PATH = os.path.join(LOGS_DIR, 'agent.log')
-_handler = RotatingFileHandler(LOG_PATH, maxBytes=1_000_000, backupCount=5)
-_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+LOG_FORMATTER = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
 
 # Use a named logger for our code only — avoids capturing httpx/groq DEBUG noise
 logger = logging.getLogger('caterva2_agent')
 logger.setLevel(logging.DEBUG)
-logger.addHandler(_handler)
-logger.propagate = True  # Let root logger handle console output for JupyterLab
+
+# Keep file logging (agent.log) without duplicating handlers across notebook re-runs.
+if not any(
+    isinstance(h, RotatingFileHandler) and getattr(h, "baseFilename", None) == os.path.abspath(LOG_PATH)
+    for h in logger.handlers
+):
+    file_handler = RotatingFileHandler(LOG_PATH, maxBytes=1_000_000, backupCount=5)
+    file_handler.setFormatter(LOG_FORMATTER)
+    logger.addHandler(file_handler)
+
+logger.propagate = False
 
 def _run_tool(tool_call) -> tuple:
     """
