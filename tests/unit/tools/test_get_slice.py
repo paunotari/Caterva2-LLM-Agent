@@ -49,7 +49,7 @@ def _ensure_local_import_bootstrap() -> None:
 
 _ensure_local_import_bootstrap()
 from caterva2_agent.tools import data_access
-from caterva2_agent.tools._base import ResolvedData
+from caterva2_agent.tools._base import ResolvedData, get_fetched_objects, clear_fetched_objects
 
 
 class _FakeDataset1D:
@@ -76,16 +76,16 @@ class _FakeDataset2D:
         return self._data[key]
 
 
-class _FakeDatasetHuge:
-    """Dataset that would exceed element limits."""
+class _FakeDatasetLarge:
+    """Large but manageable dataset used to validate summary-only responses."""
     
     def __init__(self):
-        self.shape = (1000, 1000, 1000)  # 1 billion elements
+        self.shape = (100, 200, 200)  # 4,000,000 elements
         self.dtype = "float32"
+        self._data = np.zeros(self.shape, dtype=np.float32)
     
     def __getitem__(self, key):
-        # Should never be called if limit check works
-        raise AssertionError("Should not fetch data exceeding limit")
+        return self._data[key]
 
 
 def _make_resolved(fake_dataset):
@@ -123,26 +123,26 @@ def test_get_slice_returns_data_2d(monkeypatch) -> None:
 
 
 def test_get_slice_default_slice_respects_limit(monkeypatch) -> None:
-    # What this tests: when no slice provided, defaults to safe limit.
-    # Why important: protects LLM context from huge data dumps.
+    # What this tests: when no slice is provided, tool uses the auto-preview slice.
+    # Why important: avoids accidental full loads while preserving summary-first behavior.
     monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDataset1D()))
     result = data_access.get_slice("@public/example.b2nd")  # No slice specified
 
     assert "error" not in result
-    # Should return at most MAX_SLICE_ELEMENTS (1000 < 10000, so returns all)
-    assert len(result["data"]) == 1000
+    assert result["summary"]["num_elements"] == 1000
+    assert "data" not in result
 
 
-def test_get_slice_rejects_oversized_request(monkeypatch) -> None:
-    # What this tests: requests exceeding element limit are rejected with clear error.
-    # Why important: prevents memory issues and LLM context overflow.
-    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDatasetHuge()))
-    result = data_access.get_slice("@public/huge.b2nd", slices="0:100, 0:200, 0:200")
-    
-    # 100 * 200 * 200 = 4,000,000 elements — should be rejected
-    assert "error" in result
-    assert "exceeding limit" in result["error"]
-    assert "shape" in result  # Should include shape for context
+def test_get_slice_large_request_returns_summary_only(monkeypatch) -> None:
+    # What this tests: large explicit slices are allowed but returned as summary-only payloads.
+    # Why important: decouples operation size from LLM context size.
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDatasetLarge()))
+    result = data_access.get_slice("@public/large.b2nd", slices="0:100, 0:200, 0:200")
+
+    assert "error" not in result
+    assert result["summary"]["num_elements"] == 4_000_000
+    assert "data" not in result
+    assert "_hint" in result
 
 
 def test_get_slice_invalid_syntax_returns_error(monkeypatch) -> None:
@@ -211,3 +211,16 @@ def test_get_slice_large_result_includes_hint(monkeypatch) -> None:
     assert "error" not in result
     assert "_hint" in result
     assert "summary" in result["_hint"].lower()
+    assert "data" not in result
+
+
+def test_get_slice_does_not_auto_register_server_data(monkeypatch) -> None:
+    # What this tests: get_slice no longer auto-materializes results in notebook namespace.
+    # Why important: materialization must be explicit (load_dataset).
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDataset1D()))
+    clear_fetched_objects()
+
+    result = data_access.get_slice("@public/example.b2nd", slices="0:10")
+
+    assert "error" not in result
+    assert get_fetched_objects() == {}

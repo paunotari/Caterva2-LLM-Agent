@@ -16,19 +16,31 @@ from typing import Dict, Any
 
 logger = logging.getLogger('caterva2_agent')
 
-from ._base import resolve_data, _to_json_safe, register_fetched_object, fetch_and_register_data
+from ._base import resolve_data, _to_json_safe, register_fetched_object
 
 
 # ---------------------------------------------------------------------------
 # CONSTANTS
 # ---------------------------------------------------------------------------
 
-# Hard limit to protect LLM context from huge data dumps
-MAX_SLICE_ELEMENTS = 10_000
+# Default size for auto-slice when get_slice is called without explicit slices.
+# This is not a hard operation cap; explicit user slices may be much larger.
+DEFAULT_AUTO_SLICE_ELEMENTS = 10_000
 
-# Threshold for auto-including full data vs summary-only
-# Below this, include full data; above, LLM should use summary
-SUMMARY_THRESHOLD = 100
+# Inline payload limit for LLM tool responses.
+# Above this size, tools return summary metadata only (no full array values).
+LLM_INLINE_DATA_MAX_ELEMENTS = 100
+
+# Server-side operation guardrails (warnings and extreme safety stop).
+SERVER_OP_WARNING_ELEMENTS = 100_000_000
+SERVER_OP_HARD_LIMIT_ELEMENTS = 2_000_000_000
+
+# Explicit materialization guardrails for load_dataset.
+LOAD_DATASET_MAX_ELEMENTS = 100_000_000
+LOAD_DATASET_MAX_BYTES = 100 * 1024 * 1024  # 100 MB (user-confirmed)
+
+# Keep this name for compatibility with existing summary behavior/tests.
+SUMMARY_THRESHOLD = LLM_INLINE_DATA_MAX_ELEMENTS
 
 
 # ---------------------------------------------------------------------------
@@ -40,13 +52,13 @@ DATA_ACCESS_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_slice",
-            "description": (
-                "Retrieve a slice of data values from a dataset or local variable. "
-                "Use this when the user wants to see actual data, not just statistics. "
-                "SAFETY: Limited to 10,000 elements maximum to avoid memory issues. "
-                "For large datasets, use slicing to select a specific region of interest. "
-                "Works with both server datasets (@path) and local variables (variable_name)."
-            ),
+                "description": (
+                    "Retrieve a slice of data values from a dataset or local variable. "
+                    "Use this when the user wants to see actual data, not just statistics. "
+                    "For large slices, returns metadata + summary by default instead of full values. "
+                    "To materialize data into the notebook namespace, use load_dataset explicitly. "
+                    "Works with both server datasets (@path) and local variables (variable_name)."
+                ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -77,15 +89,16 @@ DATA_ACCESS_TOOLS = [
         "type": "function",
         "function": {
             "name": "where_filter",
-            "description": (
-                "Filter dataset or local variable values based on a condition (like SQL WHERE). "
-                "Returns value_if_true where condition is met, value_if_false otherwise. "
-                "Example use case: for elevation data, filter peaks above 3000m by returning "
-                "the actual elevation where > 3000, and 0 (or NaN) elsewhere. "
-                "This is useful for masking, thresholding, or highlighting specific data regions. "
-                "SAFETY: Limited to 10,000 elements maximum — use slices for larger datasets. "
-                "Works with both server datasets (@path) and local variables (variable_name)."
-            ),
+                "description": (
+                    "Filter dataset or local variable values based on a condition (like SQL WHERE). "
+                    "Returns value_if_true where condition is met, value_if_false otherwise. "
+                    "Example use case: for elevation data, filter peaks above 3000m by returning "
+                    "the actual elevation where > 3000, and 0 (or NaN) elsewhere. "
+                    "This is useful for masking, thresholding, or highlighting specific data regions. "
+                    "For large results, returns metadata + summary by default instead of full values. "
+                    "To materialize full data into the notebook namespace, use load_dataset explicitly. "
+                    "Works with both server datasets (@path) and local variables (variable_name)."
+                ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -146,14 +159,15 @@ DATA_ACCESS_TOOLS = [
         "type": "function",
         "function": {
             "name": "load_dataset",
-            "description": (
-                "Load an entire dataset into the notebook for manipulation. "
-                "Use this when you want to work with the complete dataset in memory. "
-                "SAFETY: Checks dataset size before loading - rejects if too large. "
-                "For large datasets (>10K elements), the tool will suggest using get_slice instead. "
-                "The loaded data becomes available as a numpy array variable in the notebook. "
-                "Works with both server datasets (@path) and local variables (variable_name)."
-            ),
+                "description": (
+                    "Load an entire dataset into the notebook for manipulation. "
+                    "Use this when you want to work with the complete dataset in memory. "
+                    "SAFETY: This is explicit materialization and enforces strict size checks "
+                    "(including a 100MB cap) before loading. "
+                    "For large datasets, the tool suggests slice/filter/projection workflows. "
+                    "The loaded data becomes available as a numpy array variable in the notebook. "
+                    "Works with both server datasets (@path) and local variables (variable_name)."
+                ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -322,6 +336,67 @@ def _compute_summary(data) -> Dict[str, Any]:
     return summary
 
 
+def _estimate_nbytes(num_elements: int, dtype: Any) -> int | None:
+    """Estimate payload size in bytes from element count and dtype."""
+    import numpy as np
+
+    try:
+        itemsize = np.dtype(dtype).itemsize
+    except (TypeError, ValueError):
+        return None
+    return int(num_elements) * int(itemsize)
+
+
+def _operation_warning(estimated_elements: int, estimated_nbytes: int | None) -> str | None:
+    """Return warning text for very large server-side operations."""
+    if estimated_elements < SERVER_OP_WARNING_ELEMENTS:
+        return None
+
+    if estimated_nbytes is not None:
+        estimated_mb = estimated_nbytes / (1024 * 1024)
+        return (
+            f"Large server-side operation requested (~{estimated_elements:,} elements, "
+            f"~{estimated_mb:.1f} MB uncompressed). This may be slow or stress server resources. "
+            "If needed, prefer slicing and/or server-side projection first."
+        )
+
+    return (
+        f"Large server-side operation requested (~{estimated_elements:,} elements). "
+        "This may be slow or stress server resources. If needed, prefer slicing "
+        "and/or server-side projection first."
+    )
+
+
+def _materialize_to_numpy(value: Any) -> Any:
+    """
+    Materialize Caterva2/LazyExpr-like values to a NumPy array when possible.
+
+    This helper lets where_filter try server-side expression execution first,
+    then materialize only for summaries / optional inline data.
+    """
+    import numpy as np
+
+    if isinstance(value, np.ndarray):
+        return value
+
+    if hasattr(value, "compute"):
+        return np.asarray(value.compute())
+
+    if hasattr(value, "__array__"):
+        return np.asarray(value)
+
+    if hasattr(value, "slice"):
+        try:
+            return np.asarray(value.slice(slice(None), as_blosc2=False))
+        except Exception:
+            pass
+
+    try:
+        return np.asarray(value[:])
+    except Exception:
+        return np.asarray(value)
+
+
 # ---------------------------------------------------------------------------
 # TOOL IMPLEMENTATIONS
 # ---------------------------------------------------------------------------
@@ -330,8 +405,8 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
     """
     Retrieve a slice of data from a dataset or local variable.
     
-    Parses Python-style slice syntax and enforces a maximum element limit
-    to protect the LLM context window from huge data dumps.
+    Parses Python-style slice syntax and keeps LLM context safe by returning
+    summary-first payloads for large results.
     
     Returns both raw data and a pre-computed summary. For large results
     (>100 elements), the LLM should present the summary and offer to
@@ -357,43 +432,34 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
         
         # Parse or generate slice specification
         if slices is None:
-            slice_tuple = _default_slice_for_shape(shape, MAX_SLICE_ELEMENTS)
-            slice_str_used = str(slice_tuple)
+            slice_tuple = _default_slice_for_shape(shape, DEFAULT_AUTO_SLICE_ELEMENTS)
+            slice_str_used = f"{slice_tuple} (auto-preview)"
         else:
             slice_tuple = _parse_slice_string(slices, shape)
             slice_str_used = slices
         
-        # Estimate size and enforce limit
+        # Estimate requested result size for safety metadata
         estimated_size = _compute_slice_size(slice_tuple, shape)
-        if estimated_size > MAX_SLICE_ELEMENTS:
+        estimated_nbytes = _estimate_nbytes(estimated_size, resolved.dtype)
+
+        if estimated_size > SERVER_OP_HARD_LIMIT_ELEMENTS:
             return {
-                "error": f"Requested slice would return ~{estimated_size:,} elements, "
-                         f"exceeding limit of {MAX_SLICE_ELEMENTS:,}. "
-                         f"Please request a smaller slice.",
+                "error": (
+                    f"Requested slice is too large (~{estimated_size:,} elements). "
+                    "This exceeds the tool's extreme safety limit for a single operation. "
+                    "Use slicing and/or dimension reduction first."
+                ),
                 "shape": list(shape),
                 "requested_slice": slice_str_used
             }
+
+        warning = _operation_warning(estimated_size, estimated_nbytes)
         
         logger.debug(f"Slice tuple: {slice_tuple}")
         logger.debug(f"Estimated elements: {estimated_size}")
         
         # Fetch the data
         data = resolved[slice_tuple]
-        data_json = _to_json_safe(data)
-        
-        # Generate variable name and register for notebook injection
-        # Only register if this is from server (local vars are already in namespace)
-        variable_name = None
-        if not is_local:
-            # Sanitize path to create a valid Python identifier
-            # '@public/examples/ds-3d.b2nd' → 'ds_3d'
-            base_name = path.split('/')[-1]  # Get filename
-            base_name = base_name.replace('.b2nd', '').replace('.b2frame', '')
-            base_name = base_name.replace('-', '_').replace('@', '').replace('.', '_')
-            variable_name = base_name
-            
-            register_fetched_object(variable_name, data)
-            logger.debug(f"✓ Registered as: '{variable_name}'")
         
         # Pre-compute summary for LLM presentation
         summary = _compute_summary(data)
@@ -405,20 +471,28 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
             "dtype": str(resolved.dtype),
             "slice": slice_str_used,
             "result_shape": list(data.shape) if hasattr(data, 'shape') else [],
+            "estimated_elements": int(estimated_size),
             "summary": summary,
-            "data": data_json
+            "materialized_in_notebook": False
         }
-        
-        # Include variable name if this was registered
-        if variable_name:
-            result["variable_name"] = variable_name
-            result["note"] = f"Data stored as '{variable_name}' in notebook. Use this name to reference it in other tools."
-        
-        # Hint for the LLM on how to present results
-        if summary["num_elements"] > SUMMARY_THRESHOLD:
+
+        if estimated_nbytes is not None:
+            result["estimated_size_mb"] = round(estimated_nbytes / (1024 * 1024), 2)
+
+        if warning:
+            result["warning"] = warning
+
+        if summary["num_elements"] <= LLM_INLINE_DATA_MAX_ELEMENTS:
+            result["data"] = _to_json_safe(data)
+        else:
             result["_hint"] = (
                 f"Large result ({summary['num_elements']} elements). "
-                "Present the summary to the user and offer to show full data if requested."
+                "Summary-only payload returned to protect LLM context size. "
+                "Use load_dataset only if the user explicitly asks to materialize data."
+            )
+            result["note"] = (
+                "Full data omitted from tool output due to context-size policy. "
+                "Operation was executed, but only metadata and summary are returned."
             )
         
         return result
@@ -462,9 +536,10 @@ def where_filter(
     - value_if_true where the condition is met
     - value_if_false where the condition is not met
     
-    This is implemented using NumPy's where function on the fetched slice.
-    The tool is stateless — it fetches data fresh each call. If you previously
-    used get_slice on a region, pass the same slice here to filter that region.
+    Execution strategy:
+    - Local variables: NumPy local path
+    - Server datasets: attempt Caterva2 server-side expression + where path first;
+      fallback to local NumPy if that capability is unavailable.
     
     Use cases:
     - Thresholding: elevation > 3000 → show peaks, mask valleys
@@ -503,55 +578,72 @@ def where_filter(
         resolved = resolve_data(path)
         shape = resolved.shape
         
-        # Determine slice to apply (for size safety)
+        # Determine slice to apply.
+        # If no slice is provided, run on full dataset by default.
         if slices is None:
-            slice_tuple = _default_slice_for_shape(shape, MAX_SLICE_ELEMENTS)
-            slice_str_used = "(default — first elements)"
+            slice_tuple = tuple(slice(None) for _ in shape)
+            slice_str_used = "(full dataset)"
         else:
             slice_tuple = _parse_slice_string(slices, shape)
             slice_str_used = slices
         
-        # Estimate size and enforce limit
+        # Estimate requested region for safety metadata
         estimated_size = _compute_slice_size(slice_tuple, shape)
-        if estimated_size > MAX_SLICE_ELEMENTS:
+        estimated_nbytes = _estimate_nbytes(estimated_size, resolved.dtype)
+
+        if estimated_size > SERVER_OP_HARD_LIMIT_ELEMENTS:
             return {
-                "error": f"Requested region would return ~{estimated_size:,} elements, "
-                         f"exceeding limit of {MAX_SLICE_ELEMENTS:,}. "
-                         f"Please specify a smaller slice.",
+                "error": (
+                    f"Requested filter region is too large (~{estimated_size:,} elements). "
+                    "This exceeds the tool's extreme safety limit for a single operation. "
+                    "Use slicing and/or server-side reduction first."
+                ),
                 "shape": list(shape),
                 "requested_slice": slice_str_used
             }
+
+        warning = _operation_warning(estimated_size, estimated_nbytes)
         
         logger.debug(f"Estimated elements: {estimated_size}")
         
-        # Step 1: Get the data slice as numpy array
-        data_slice = resolved[slice_tuple]
-        
-        # Step 2: Build the boolean condition
         compare_fn = COMPARISON_OPERATORS[operator]
-        condition = compare_fn(data_slice, threshold)
-        
-        # Step 3: Determine replacement values
-        # If value_if_true is None, use the original data (passthrough)
-        # If value_if_false is None, default to 0
         import numpy as np
-        
-        v_true = data_slice if value_if_true is None else value_if_true
         v_false = 0 if value_if_false is None else value_if_false
-        
-        # Step 4: Apply where condition
-        # np.where(condition, x, y) returns x where True, y where False
-        result_data = np.where(condition, v_true, v_false)
-        
-        # Register for notebook injection (user can access as a variable)
-        # Use a descriptive path that includes the filter condition
-        # Only register if this is from server (local vars are already in namespace)
-        if not is_local:
-            filter_path = f"{path}[{operator}{threshold}]"
-            register_fetched_object(filter_path, result_data)
-        
-        # Convert to JSON-safe format
-        result_json = _to_json_safe(result_data)
+        execution_mode = "local_numpy"
+
+        # Server datasets: try server-side where first.
+        if resolved.is_server():
+            try:
+                server_operand = resolved.data
+                if slices is not None:
+                    if not hasattr(server_operand, "slice"):
+                        raise AttributeError("Dataset.slice() is unavailable")
+                    server_operand = server_operand.slice(slice_tuple, as_blosc2=True)
+
+                condition_obj = compare_fn(server_operand, threshold)
+                if not hasattr(condition_obj, "where"):
+                    raise AttributeError("Condition object has no where() method")
+
+                v_true_server = server_operand if value_if_true is None else value_if_true
+                result_obj = condition_obj.where(v_true_server, v_false)
+
+                condition = np.asarray(_materialize_to_numpy(condition_obj), dtype=bool)
+                result_data = np.asarray(_materialize_to_numpy(result_obj))
+                execution_mode = "server_where"
+            except Exception as e:
+                logger.warning(
+                    f"Server-side where unavailable for '{path}' ({type(e).__name__}: {e}); "
+                    "falling back to local NumPy."
+                )
+                data_slice = resolved[slice_tuple]
+                condition = compare_fn(data_slice, threshold)
+                v_true_local = data_slice if value_if_true is None else value_if_true
+                result_data = np.where(condition, v_true_local, v_false)
+        else:
+            data_slice = resolved[slice_tuple]
+            condition = compare_fn(data_slice, threshold)
+            v_true_local = data_slice if value_if_true is None else value_if_true
+            result_data = np.where(condition, v_true_local, v_false)
         
         # Compute summary statistics
         summary = _compute_summary(result_data)
@@ -569,23 +661,39 @@ def where_filter(
             "condition": f"data {operator} {threshold}",
             "slice_applied": slice_str_used,
             "result_shape": list(result_data.shape),
+            "estimated_elements": int(estimated_size),
             "value_if_true": "original_data" if value_if_true is None else value_if_true,
             "value_if_false": v_false,
+            "execution_mode": execution_mode,
             "match_summary": {
                 "matched": num_matched,
                 "total": num_total,
                 "percentage": round(match_percentage, 2)
             },
             "summary": summary,
-            "data": result_json
+            "materialized_in_notebook": False
         }
+
+        if estimated_nbytes is not None:
+            result["estimated_size_mb"] = round(estimated_nbytes / (1024 * 1024), 2)
+
+        if warning:
+            result["warning"] = warning
+
+        if summary["num_elements"] <= LLM_INLINE_DATA_MAX_ELEMENTS:
+            result["data"] = _to_json_safe(result_data)
         
         # Hint for LLM on how to present results
-        if summary["num_elements"] > SUMMARY_THRESHOLD:
+        if summary["num_elements"] > LLM_INLINE_DATA_MAX_ELEMENTS:
             result["_hint"] = (
                 f"Large result ({summary['num_elements']} elements). "
                 f"{num_matched} values ({match_percentage:.1f}%) matched the condition. "
-                "Present the summary to the user and offer to show full data if requested."
+                "Summary-only payload returned to protect LLM context size. "
+                "Use load_dataset only if the user explicitly asks to materialize data."
+            )
+            result["note"] = (
+                "Full filtered data omitted from tool output due to context-size policy. "
+                "Operation was executed, but only metadata and summary are returned."
             )
         
         return result
@@ -610,8 +718,8 @@ def load_dataset(path: str) -> Dict[str, Any]:
     This is the explicit "I want all of this data" tool. It loads the complete
     dataset (after decompression if from Caterva2) into memory as a numpy array.
     
-    Safety: Enforces the same 10K element limit as get_slice. For larger datasets,
-    suggests using get_slice to fetch specific regions instead.
+    Safety: This is explicit materialization. Enforces strict size checks including
+    an explicit 100MB cap for notebook loading.
     
     Args:
         path: Server dataset path (e.g. '@public/examples/ds-1d.b2nd')
@@ -620,29 +728,82 @@ def load_dataset(path: str) -> Dict[str, Any]:
     Returns:
         Dict with dataset metadata, summary, and data values, or 'error' on failure.
     """
-    from ._base import fetch_and_register_data
-    
     is_local = not path.startswith("@")
     source_type = "local variable" if is_local else "server dataset"
     
     logger.info(f"Loading full {source_type}: '{path}'")
     
     try:
-        # Fetch the entire dataset with safety check
-        data, metadata = fetch_and_register_data(
-            path=path,
-            slice_spec=None,  # Full dataset
-            max_elements=MAX_SLICE_ELEMENTS
-        )
-        
-        logger.debug(f"✓ Loaded: shape={metadata['shape']}, dtype={metadata['dtype']}")
-        logger.debug(f"Size: {metadata['size_mb']} MB ({data.size:,} elements)")
-        
-        if metadata['registered']:
-            logger.debug(f"📦 Available in notebook for manipulation")
-        
-        # Convert to JSON-safe format
-        data_json = _to_json_safe(data)
+        import numpy as np
+
+        resolved = resolve_data(path)
+        total_elements = int(np.prod(resolved.shape))
+        estimated_nbytes = _estimate_nbytes(total_elements, resolved.dtype)
+
+        if total_elements > LOAD_DATASET_MAX_ELEMENTS:
+            return {
+                "error": (
+                    f"Dataset has {total_elements:,} elements, exceeding explicit load limit "
+                    f"of {LOAD_DATASET_MAX_ELEMENTS:,} elements."
+                ),
+                "shape": list(resolved.shape),
+                "dtype": str(resolved.dtype),
+                "suggestion": (
+                    "Use get_slice/where_filter/collapse_dimensions to work server-side, "
+                    "or request a smaller slice before loading."
+                )
+            }
+
+        if estimated_nbytes is not None and estimated_nbytes > LOAD_DATASET_MAX_BYTES:
+            est_mb = estimated_nbytes / (1024 * 1024)
+            return {
+                "error": (
+                    f"Estimated materialized size is ~{est_mb:.2f} MB, exceeding "
+                    f"the 100 MB load limit."
+                ),
+                "shape": list(resolved.shape),
+                "dtype": str(resolved.dtype),
+                "estimated_size_mb": round(est_mb, 2),
+                "suggestion": (
+                    "Use get_slice/where_filter/collapse_dimensions for server-side operations, "
+                    "then load a smaller result if needed."
+                )
+            }
+
+        # Materialize explicitly
+        data = resolved[:] if not resolved.is_local() else resolved.data
+        data = np.asarray(data)
+
+        # Final guard using actual in-memory size
+        if data.nbytes > LOAD_DATASET_MAX_BYTES:
+            actual_mb = data.nbytes / (1024 * 1024)
+            return {
+                "error": (
+                    f"Materialized array size is {actual_mb:.2f} MB, exceeding "
+                    f"the 100 MB load limit."
+                ),
+                "shape": list(data.shape),
+                "dtype": str(data.dtype),
+                "size_mb": round(actual_mb, 2),
+                "suggestion": (
+                    "Use get_slice/where_filter/collapse_dimensions for server-side operations, "
+                    "then load a smaller result if needed."
+                )
+            }
+
+        # Register only for server datasets; local variables are already available.
+        registered = False
+        if not is_local:
+            register_fetched_object(path, data)
+            registered = True
+
+        size_bytes = int(data.nbytes)
+        size_mb = round(size_bytes / (1024 * 1024), 2)
+
+        logger.debug(f"✓ Loaded: shape={list(data.shape)}, dtype={data.dtype}")
+        logger.debug(f"Size: {size_mb} MB ({data.size:,} elements)")
+        if registered:
+            logger.debug("📦 Available in notebook for manipulation")
         
         # Compute summary statistics
         summary = _compute_summary(data)
@@ -650,23 +811,23 @@ def load_dataset(path: str) -> Dict[str, Any]:
         result = {
             "status": "success",
             "path": path,
-            "source": metadata['source'],
-            "shape": metadata['shape'],
-            "dtype": metadata['dtype'],
-            "size_bytes": metadata['size_bytes'],
-            "size_mb": metadata['size_mb'],
+            "source": "local" if is_local else "server",
+            "shape": list(data.shape),
+            "dtype": str(data.dtype),
+            "size_bytes": size_bytes,
+            "size_mb": size_mb,
             "num_elements": data.size,
             "summary": summary,
-            "registered_in_notebook": metadata['registered']
+            "registered_in_notebook": registered
         }
         
-        # Include full data if small enough for LLM context
-        if data.size <= SUMMARY_THRESHOLD:
-            result["data"] = data_json
+        # Include full data only for very small payloads
+        if data.size <= LLM_INLINE_DATA_MAX_ELEMENTS:
+            result["data"] = _to_json_safe(data)
         else:
             result["note"] = (
-                f"Data has {data.size} elements — showing summary only. "
-                f"Data is available in your notebook for direct manipulation."
+                f"Data has {data.size:,} elements — returning summary only to protect LLM context. "
+                f"The dataset is materialized in notebook memory via load_dataset."
             )
         
         return result

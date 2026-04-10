@@ -49,7 +49,7 @@ def _ensure_local_import_bootstrap() -> None:
 
 _ensure_local_import_bootstrap()
 from caterva2_agent.tools import data_access
-from caterva2_agent.tools._base import ResolvedData
+from caterva2_agent.tools._base import ResolvedData, get_fetched_objects, clear_fetched_objects
 
 
 class _FakeDataset1D:
@@ -87,6 +87,85 @@ class _FakeElevationDataset:
     
     def __getitem__(self, key):
         return self._data[key]
+
+
+class _FakeServerCondition:
+    """Boolean condition object with server-style where()."""
+
+    def __init__(self, mask: np.ndarray, source_values: np.ndarray):
+        self._mask = np.asarray(mask, dtype=bool)
+        self._source_values = np.asarray(source_values)
+
+    def where(self, value1=None, value2=None):
+        true_values = self._source_values if value1 is None else np.asarray(value1)
+        false_values = 0 if value2 is None else value2
+        return _FakeServerOperand(np.where(self._mask, true_values, false_values))
+
+    def __array__(self, dtype=None):
+        return np.asarray(self._mask, dtype=dtype)
+
+
+class _FakeServerOperand:
+    """Server-side operand that supports comparisons and materialization."""
+
+    def __init__(self, data: np.ndarray):
+        self._data = np.asarray(data)
+        self.shape = self._data.shape
+        self.dtype = self._data.dtype
+
+    def __gt__(self, threshold):
+        return _FakeServerCondition(self._data > threshold, self._data)
+
+    def __ge__(self, threshold):
+        return _FakeServerCondition(self._data >= threshold, self._data)
+
+    def __lt__(self, threshold):
+        return _FakeServerCondition(self._data < threshold, self._data)
+
+    def __le__(self, threshold):
+        return _FakeServerCondition(self._data <= threshold, self._data)
+
+    def __eq__(self, threshold):
+        return _FakeServerCondition(self._data == threshold, self._data)
+
+    def __ne__(self, threshold):
+        return _FakeServerCondition(self._data != threshold, self._data)
+
+    def __array__(self, dtype=None):
+        return np.asarray(self._data, dtype=dtype)
+
+
+class _FakeServerWhereDataset:
+    """Dataset mock with server-style slice() + comparison support."""
+
+    def __init__(self):
+        self.shape = (100,)
+        self.dtype = "int64"
+        self._data = np.arange(100)
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def slice(self, key, as_blosc2=True):
+        return _FakeServerOperand(self._data[key])
+
+    def __gt__(self, threshold):
+        return _FakeServerOperand(self._data) > threshold
+
+    def __ge__(self, threshold):
+        return _FakeServerOperand(self._data) >= threshold
+
+    def __lt__(self, threshold):
+        return _FakeServerOperand(self._data) < threshold
+
+    def __le__(self, threshold):
+        return _FakeServerOperand(self._data) <= threshold
+
+    def __eq__(self, threshold):
+        return _FakeServerOperand(self._data) == threshold
+
+    def __ne__(self, threshold):
+        return _FakeServerOperand(self._data) != threshold
 
 
 def _make_resolved(fake_dataset):
@@ -206,6 +285,39 @@ def test_where_filter_2d_dataset(monkeypatch) -> None:
     assert all(all(v == 0 for v in row) for row in data)
 
 
+def test_where_filter_prefers_server_where_when_available(monkeypatch) -> None:
+    # What this tests: server datasets use server-style where path when supported.
+    # Why important: avoids forcing NumPy local filtering for server-backed data.
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeServerWhereDataset()))
+    result = data_access.where_filter(
+        path="@public/example.b2nd",
+        operator=">",
+        threshold=95,
+        slices="0:100"
+    )
+
+    assert "error" not in result
+    assert result["execution_mode"] == "server_where"
+    assert result["match_summary"]["matched"] == 4
+    assert result["data"][-1] == 99
+
+
+def test_where_filter_falls_back_to_local_numpy_when_server_where_unavailable(monkeypatch) -> None:
+    # What this tests: server path fallback is explicit and safe when capabilities are missing.
+    # Why important: keeps tool robust across API/version differences.
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDataset1D()))
+    result = data_access.where_filter(
+        path="@public/example.b2nd",
+        operator=">",
+        threshold=95,
+        slices="0:100"
+    )
+
+    assert "error" not in result
+    assert result["execution_mode"] == "local_numpy"
+    assert result["match_summary"]["matched"] == 4
+
+
 # ---------------------------------------------------------------------------
 # EDGE CASES AND ERROR HANDLING
 # ---------------------------------------------------------------------------
@@ -224,27 +336,29 @@ def test_where_filter_invalid_operator(monkeypatch) -> None:
     assert "Invalid operator" in result["error"]
 
 
-def test_where_filter_oversized_request_rejected(monkeypatch) -> None:
-    # What this tests: requests exceeding element limit are rejected.
-    # Why important: prevents memory issues.
-    
-    class _HugeDataset:
+def test_where_filter_large_request_returns_summary_only(monkeypatch) -> None:
+    # What this tests: large filter requests are allowed but returned as summary-only payloads.
+    # Why important: decouples operation size from LLM context size.
+    class _LargeDataset:
         def __init__(self):
-            self.shape = (1000, 1000, 1000)
+            self.shape = (100, 200, 200)  # 4,000,000 elements
             self.dtype = "float32"
+            self._data = np.arange(4_000_000, dtype=np.float32).reshape(self.shape)
         def __getitem__(self, key):
-            raise AssertionError("Should not fetch data")
-    
-    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_HugeDataset()))
+            return self._data[key]
+
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_LargeDataset()))
     result = data_access.where_filter(
-        path="@public/huge.b2nd",
+        path="@public/large.b2nd",
         operator=">",
         threshold=0,
         slices="0:100, 0:200, 0:200"  # 4M elements
     )
 
-    assert "error" in result
-    assert "exceeding limit" in result["error"]
+    assert "error" not in result
+    assert result["summary"]["num_elements"] == 4_000_000
+    assert "data" not in result
+    assert "_hint" in result
 
 
 def test_where_filter_equal_operator(monkeypatch) -> None:
@@ -311,6 +425,7 @@ def test_where_filter_output_contract(monkeypatch) -> None:
     assert "result_shape" in result
     assert "value_if_true" in result
     assert "value_if_false" in result
+    assert "execution_mode" in result
     assert "match_summary" in result
     assert "summary" in result
     assert "data" in result
@@ -344,3 +459,21 @@ def test_where_filter_large_result_includes_hint(monkeypatch) -> None:
     assert "error" not in result
     assert "_hint" in result
     assert "summary" in result["_hint"].lower()
+    assert "data" not in result
+
+
+def test_where_filter_does_not_auto_register_server_data(monkeypatch) -> None:
+    # What this tests: where_filter no longer auto-materializes results in notebook namespace.
+    # Why important: materialization must be explicit (load_dataset).
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDataset1D()))
+    clear_fetched_objects()
+
+    result = data_access.where_filter(
+        path="@public/example.b2nd",
+        operator=">",
+        threshold=50,
+        slices="0:100"
+    )
+
+    assert "error" not in result
+    assert get_fetched_objects() == {}
