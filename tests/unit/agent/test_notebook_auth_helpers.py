@@ -19,6 +19,48 @@ if "IPython.display" not in sys.modules:
 from caterva2_agent import notebook
 
 
+def test_login_interactive_prompts_hidden_password_and_calls_login(monkeypatch) -> None:
+    # What this tests: interactive helper reads username + hidden password then delegates.
+    # Why important: keeps passwords out of notebook cells while reusing login flow.
+    captured: dict[str, tuple[str, str]] = {}
+
+    monkeypatch.setattr("builtins.input", lambda _prompt: "alice")
+    monkeypatch.setattr(notebook, "getpass", lambda _prompt: "secret")
+    monkeypatch.setattr(
+        notebook,
+        "login",
+        lambda username, password: captured.update({"credentials": (username, password)}),
+    )
+
+    notebook.login_interactive()
+
+    assert captured["credentials"] == ("alice", "secret")
+
+
+def test_login_interactive_uses_provided_username_without_prompt(monkeypatch) -> None:
+    # What this tests: optional username bypasses input prompt.
+    # Why important: allows scripted notebook flows with hidden password only.
+    captured: dict[str, tuple[str, str]] = {}
+    input_called = {"value": False}
+
+    def _unexpected_input(_prompt: str) -> str:
+        input_called["value"] = True
+        return "should-not-be-used"
+
+    monkeypatch.setattr("builtins.input", _unexpected_input)
+    monkeypatch.setattr(notebook, "getpass", lambda _prompt: "secret")
+    monkeypatch.setattr(
+        notebook,
+        "login",
+        lambda username, password: captured.update({"credentials": (username, password)}),
+    )
+
+    notebook.login_interactive("alice")
+
+    assert input_called["value"] is False
+    assert captured["credentials"] == ("alice", "secret")
+
+
 def test_login_success_calls_set_client_auth_and_displays_status(monkeypatch) -> None:
     # What this tests: notebook login wires to runtime auth state manager.
     # Why important: this is the user-facing entry point for authentication.

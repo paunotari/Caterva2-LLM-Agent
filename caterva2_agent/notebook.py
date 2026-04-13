@@ -11,6 +11,7 @@ Key functions:
 - ask(message): Send a question to the agent, display response
 - reset(): Clear agent memory (start fresh conversation)
 - variables(): List agent-injected variables
+- login_interactive(username=None): Prompt hidden password auth
 - login(username, password): Authenticate Caterva2 client for this session
 - logout(): Return Caterva2 client to anonymous mode
 - auth_status(): Show current Caterva2 authentication state
@@ -26,6 +27,7 @@ with custom data transformations.
 """
 
 import re
+from getpass import getpass
 from typing import Any
 
 from IPython import get_ipython
@@ -439,6 +441,32 @@ def variables() -> None:
 # ---------------------------------------------------------------------------
 # AUTHENTICATION HELPERS
 # ---------------------------------------------------------------------------
+
+def login_interactive(username: str | None = None) -> None:
+    """
+    Prompt for credentials and authenticate without echoing the password.
+
+    This is the recommended notebook authentication path because the password
+    is entered through a hidden prompt instead of cell source code.
+    """
+    try:
+        username_value = username.strip() if username is not None else input("Caterva2 username: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("[Login cancelled]")
+        return
+
+    if not username_value:
+        print("[Login failed: username cannot be empty]")
+        return
+
+    try:
+        password = getpass("Caterva2 password: ")
+    except (EOFError, KeyboardInterrupt):
+        print("[Login cancelled]")
+        return
+
+    login(username_value, password)
+
 
 def login(username: str, password: str) -> None:
     """
