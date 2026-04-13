@@ -74,8 +74,8 @@ DATASET_MANAGEMENT_TOOLS = [
             "name": "move_dataset",
             "description": (
                 "Move a server dataset/file from one path to another. "
-                "Safety policy: dry_run is true by default. Execute only with "
-                "dry_run=false and confirm=true."
+                "Safety policy: dry_run is true by default, and execution requires "
+                "explicit user confirmation."
             ),
             "parameters": {
                 "type": "object",
@@ -97,7 +97,7 @@ DATASET_MANAGEMENT_TOOLS = [
                     "confirm": {
                         "type": "boolean",
                         "description": (
-                            "Must be true to execute when dry_run is false."
+                            "Explicit confirmation flag for execution requests."
                         ),
                     },
                 },
@@ -111,8 +111,8 @@ DATASET_MANAGEMENT_TOOLS = [
             "name": "remove_dataset",
             "description": (
                 "Remove a server dataset/file permanently. "
-                "Safety policy: dry_run is true by default. Execute only with "
-                "dry_run=false and confirm=true."
+                "Safety policy: dry_run is true by default, and execution requires "
+                "explicit user confirmation."
             ),
             "parameters": {
                 "type": "object",
@@ -130,7 +130,7 @@ DATASET_MANAGEMENT_TOOLS = [
                     "confirm": {
                         "type": "boolean",
                         "description": (
-                            "Must be true to execute when dry_run is false."
+                            "Explicit confirmation flag for execution requests."
                         ),
                     },
                 },
@@ -198,11 +198,7 @@ def _dry_run_preview(operation: str, path: str, destination: str | None = None) 
         "path": path,
         "server_change_applied": False,
         "requires_confirmation": True,
-        "next_step": (
-            f"Call {operation}_dataset again with dry_run=false and confirm=true to execute."
-            if operation in {"move", "remove"}
-            else "Re-run with explicit execution flags to apply server change."
-        ),
+        "next_step": "Await explicit user confirmation before executing this operation.",
     }
     if destination is not None:
         result["destination"] = destination
@@ -295,10 +291,11 @@ def move_dataset(path: str, destination: str, dry_run: bool = True, confirm: boo
         return _dry_run_preview("move", path, destination)
     if not confirm:
         return {
-            "error": "Confirmation required. Set confirm=true to execute move.",
+            "error": "Confirmation required before executing move.",
             "operation": "move",
             "path": path,
             "destination": destination,
+            "requires_confirmation": True,
             "server_change_applied": False,
         }
 
@@ -332,9 +329,10 @@ def remove_dataset(path: str, dry_run: bool = True, confirm: bool = False) -> Di
         return _dry_run_preview("remove", path)
     if not confirm:
         return {
-            "error": "Confirmation required. Set confirm=true to execute removal.",
+            "error": "Confirmation required before executing removal.",
             "operation": "remove",
             "path": path,
+            "requires_confirmation": True,
             "server_change_applied": False,
             "warning": "Removal is irreversible.",
         }

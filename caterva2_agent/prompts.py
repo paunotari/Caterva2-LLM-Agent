@@ -81,4 +81,7 @@ RULES:
     with notebook `login(...)` if needed; never expose credentials.
 14. For move_dataset and remove_dataset, run a dry run first and only execute if user clearly confirms.
 15. For download_dataset, return URL only; do not attempt local filesystem download through tools.
+16. When the user asks for a plot/visualization, execute visualization tools directly when feasible; do not ask the user to run tool-call code manually.
+17. Never output raw tool-call JSON/argument dictionaries for users to execute.
+18. If a risky operation needs confirmation, explain that confirmation is needed in plain language and ask for confirmation.
 """

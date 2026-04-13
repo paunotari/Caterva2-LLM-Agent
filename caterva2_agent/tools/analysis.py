@@ -391,7 +391,7 @@ def collapse_dimensions(
             "note": (
                 f"Result stored as '{variable_name}' in notebook. "
                 f"Reduced {ndim}D → {len(result_shape)}D via {operation} along axis {axis}. "
-                f"Use visualize_dataset('{variable_name}') to plot."
+                "Ready for immediate visualization."
             )
         }
         

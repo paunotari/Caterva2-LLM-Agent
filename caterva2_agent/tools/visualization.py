@@ -424,15 +424,15 @@ def visualize_dataset(
                     suggestion_text = (
                         f"This {ndim}D dataset is too large for interactive visualization. "
                         f"Recommended approaches:\n"
-                        f"1. Use collapse_dimensions('{path}', axis=N, operation='max'|'mean'|'sum') "
-                        f"to reduce {ndim}D → {ndim-1}D via server-side aggregation\n"
-                        f"2. Or provide 'slices' to select a small region like '0, :, :' for inspection"
+                        f"1. Collapse one axis with a server-side reduction (max/mean/sum) "
+                        f"to reduce {ndim}D → {ndim-1}D\n"
+                        "2. Or apply slices to select a smaller region before plotting"
                     )
                 else:
                     # For 1D/2D, slicing is more appropriate
                     suggestion_text = (
                         f"Dataset too large ({total_elements:,} elements). "
-                        f"Use 'slices' to visualize a region, e.g., '0:{min(1000, shape[0])}'"
+                        f"Use slices to visualize a smaller region (for example the first {min(1000, shape[0])} elements)."
                     )
                 
                 return {

@@ -141,6 +141,8 @@ def test_move_dataset_is_dry_run_by_default(monkeypatch) -> None:
 
     assert result["status"] == "dry_run"
     assert result["operation"] == "move"
+    assert result["requires_confirmation"] is True
+    assert "confirm=true" not in result["next_step"]
     assert fake_file.move_calls == []
 
 
@@ -164,6 +166,7 @@ def test_move_dataset_requires_confirm_for_execution(monkeypatch) -> None:
 
     assert "error" in result
     assert "Confirmation required" in result["error"]
+    assert result["requires_confirmation"] is True
     assert fake_file.move_calls == []
 
 

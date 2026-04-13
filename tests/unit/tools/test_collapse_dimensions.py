@@ -269,6 +269,7 @@ def test_collapse_dimensions_includes_metadata(monkeypatch) -> None:
     assert "dtype" in result
     assert "data_range" in result
     assert "note" in result
+    assert "visualize_dataset(" not in result["note"]
     
     # Data range should include min and max
     assert "min" in result["data_range"]
