@@ -36,6 +36,12 @@ AVAILABLE TOOLS BY CATEGORY:
 - where_filter: Conditionally select values (like SQL WHERE), summary-first for large outputs
 - load_dataset: Explicitly materialize a dataset in notebook memory (strict size checks apply)
 
+**Dataset Management** — copy/move/remove/download server datasets/files:
+- copy_dataset: Copy a server dataset/file to another server path (auth required)
+- download_dataset: Return direct download link only (no local-path download mode)
+- move_dataset: Move a server dataset/file (dry-run + explicit confirm required)
+- remove_dataset: Remove a server dataset/file (dry-run + explicit confirm required)
+
 **Visualization** — render interactive plots:
 - visualize_dataset: Auto-detect dimensionality and create appropriate plot (1D→line, 2D→heatmap, 3D→volume)
   Note: Limited to ~500K elements for browser performance
@@ -73,4 +79,6 @@ RULES:
 12. Only mention a variable name when a tool explicitly materializes data in notebook memory.
 13. For private/write operations (copy/delete/modify), remind the user to authenticate first
     with notebook `login(...)` if needed; never expose credentials.
+14. For move_dataset and remove_dataset, run a dry run first and only execute if user clearly confirms.
+15. For download_dataset, return URL only; do not attempt local filesystem download through tools.
 """

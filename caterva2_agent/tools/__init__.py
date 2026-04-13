@@ -10,8 +10,10 @@ Public API:
 
 Tool categories:
 - browsing: list_roots, list_datasets, get_dataset_info
-- analysis: get_dataset_stats
-- data_access: get_slice
+- analysis: get_dataset_stats, collapse_dimensions
+- data_access: get_slice, where_filter, load_dataset
+- dataset_management: copy_dataset, download_dataset, move_dataset, remove_dataset
+- visualization: visualize_dataset, render_projection
 """
 
 from ._registry import TOOLS, TOOL_MAP, execute_tool

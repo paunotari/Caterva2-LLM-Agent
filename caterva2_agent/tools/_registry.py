@@ -19,16 +19,23 @@ from typing import Dict, Any
 from .browsing import BROWSING_TOOLS, list_roots, list_datasets, get_dataset_info
 from .analysis import ANALYSIS_TOOLS, get_dataset_stats, collapse_dimensions
 from .data_access import DATA_ACCESS_TOOLS, get_slice, where_filter, load_dataset
+from .dataset_management import DATASET_MANAGEMENT_TOOLS, copy_dataset, download_dataset, move_dataset, remove_dataset
 from .visualization import VISUALIZATION_TOOLS, visualize_dataset, render_projection
 
 
 # ---------------------------------------------------------------------------
 # COMBINED TOOL SCHEMAS
 # Sent to the LLM so it knows what tools exist.
-# Order: browsing → analysis → data_access → visualization (discovery before manipulation)
+# Order: browsing → analysis → data_access → management → visualization
 # ---------------------------------------------------------------------------
 
-TOOLS = BROWSING_TOOLS + ANALYSIS_TOOLS + DATA_ACCESS_TOOLS + VISUALIZATION_TOOLS
+TOOLS = (
+    BROWSING_TOOLS
+    + ANALYSIS_TOOLS
+    + DATA_ACCESS_TOOLS
+    + DATASET_MANAGEMENT_TOOLS
+    + VISUALIZATION_TOOLS
+)
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +57,12 @@ TOOL_MAP = {
     "get_slice": get_slice,
     "where_filter": where_filter,
     "load_dataset": load_dataset,
+
+    # Dataset management tools
+    "copy_dataset": copy_dataset,
+    "download_dataset": download_dataset,
+    "move_dataset": move_dataset,
+    "remove_dataset": remove_dataset,
     
     # Visualization tools
     "visualize_dataset": visualize_dataset,
