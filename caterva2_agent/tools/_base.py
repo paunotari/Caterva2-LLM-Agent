@@ -3,6 +3,7 @@ Shared helpers for all tool implementations.
 
 This module provides:
 - Caterva2 client management (singleton pattern)
+- Runtime authentication session management
 - Unified data resolver (server datasets + local variables)
 - JSON serialization utilities
 - Object registry for notebook integration
@@ -101,6 +102,112 @@ def get_notebook_namespace() -> dict | None:
 # ---------------------------------------------------------------------------
 
 _cat2_client: cat2.Client | None = None
+_cat2_client_urlbase: str = CATERVA2_URLBASE
+_cat2_client_auth: tuple[str, str] | None = None
+_cat2_auth_username: str | None = None
+
+
+def _close_client(client: cat2.Client | None) -> None:
+    """Best-effort close for a Caterva2 client instance."""
+    if client is None:
+        return
+
+    close_fn = getattr(client, "close", None)
+    if callable(close_fn):
+        try:
+            close_fn()
+        except Exception:
+            # Closing should never break session state transitions.
+            pass
+
+
+def get_client_auth_status() -> dict[str, Any]:
+    """
+    Return current Caterva2 client authentication status for UI/reporting.
+
+    Returns:
+        Dict with:
+        - urlbase: active Caterva2 server URL
+        - authenticated: whether runtime auth is active
+        - username: authenticated user or None
+    """
+    return {
+        "urlbase": _cat2_client_urlbase,
+        "authenticated": _cat2_client_auth is not None,
+        "username": _cat2_auth_username,
+    }
+
+
+def set_client_auth(username: str, password: str, urlbase: str | None = None) -> dict[str, Any]:
+    """
+    Authenticate the Caterva2 client for the current runtime session.
+
+    Authentication in Caterva2 is done at client construction time
+    (`cat2.Client(urlbase, auth=(username, password))`). This function validates
+    credentials with a lightweight request and, on success, swaps the shared
+    singleton client to authenticated mode.
+
+    Raises:
+        ValueError: For invalid input or authentication failures.
+    """
+    global _cat2_client, _cat2_client_urlbase, _cat2_client_auth, _cat2_auth_username
+
+    username_clean = username.strip()
+    target_url = (urlbase or _cat2_client_urlbase or CATERVA2_URLBASE).strip()
+
+    if not username_clean:
+        raise ValueError("Username cannot be empty.")
+    if not password:
+        raise ValueError("Password cannot be empty.")
+    if not target_url:
+        raise ValueError("Caterva2 URL cannot be empty.")
+
+    candidate = cat2.Client(target_url, auth=(username_clean, password))
+    try:
+        # Validate credentials and connectivity before mutating global state.
+        candidate.get_roots()
+    except Exception as e:
+        _close_client(candidate)
+        raise ValueError(f"Authentication failed for '{username_clean}': {e}") from e
+
+    old_client = _cat2_client
+    _cat2_client = candidate
+    _cat2_client_urlbase = target_url
+    _cat2_client_auth = (username_clean, password)
+    _cat2_auth_username = username_clean
+
+    if old_client is not candidate:
+        _close_client(old_client)
+
+    return {
+        "status": "authenticated",
+        "urlbase": _cat2_client_urlbase,
+        "authenticated": True,
+        "username": _cat2_auth_username,
+    }
+
+
+def clear_client_auth() -> dict[str, Any]:
+    """
+    Clear runtime Caterva2 authentication and return to anonymous mode.
+
+    This does not change the current server URL; it only drops credentials and
+    resets the shared client so the next call recreates an anonymous client.
+    """
+    global _cat2_client, _cat2_client_auth, _cat2_auth_username
+
+    old_client = _cat2_client
+    _cat2_client = None
+    _cat2_client_auth = None
+    _cat2_auth_username = None
+    _close_client(old_client)
+
+    return {
+        "status": "anonymous",
+        "urlbase": _cat2_client_urlbase,
+        "authenticated": False,
+        "username": None,
+    }
 
 
 def _get_client() -> Client | None:
@@ -112,7 +219,10 @@ def _get_client() -> Client | None:
     """
     global _cat2_client
     if _cat2_client is None:
-        _cat2_client = cat2.Client(CATERVA2_URLBASE)
+        if _cat2_client_auth is None:
+            _cat2_client = cat2.Client(_cat2_client_urlbase)
+        else:
+            _cat2_client = cat2.Client(_cat2_client_urlbase, auth=_cat2_client_auth)
     return _cat2_client
 
 

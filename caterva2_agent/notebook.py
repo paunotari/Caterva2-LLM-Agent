@@ -11,6 +11,9 @@ Key functions:
 - ask(message): Send a question to the agent, display response
 - reset(): Clear agent memory (start fresh conversation)
 - variables(): List agent-injected variables
+- login(username, password): Authenticate Caterva2 client for this session
+- logout(): Return Caterva2 client to anonymous mode
+- auth_status(): Show current Caterva2 authentication state
 
 Variable Reference Syntax:
 - Use {variable_name} to reference a local variable
@@ -29,7 +32,13 @@ from IPython import get_ipython
 from IPython.display import display, Markdown
 
 from caterva2_agent.agent import Agent
-from caterva2_agent.tools._base import pop_fetched_objects, set_notebook_namespace
+from caterva2_agent.tools._base import (
+    pop_fetched_objects,
+    set_notebook_namespace,
+    set_client_auth,
+    clear_client_auth,
+    get_client_auth_status,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +434,65 @@ def variables() -> None:
         "You can use these in your own code."
     )
     _display_response(md)
+
+
+# ---------------------------------------------------------------------------
+# AUTHENTICATION HELPERS
+# ---------------------------------------------------------------------------
+
+def login(username: str, password: str) -> None:
+    """
+    Authenticate Caterva2 access for the current notebook session.
+
+    Credentials are kept in memory only and never written to disk.
+    """
+    username = username.strip()
+    if not username:
+        print("[Login failed: username cannot be empty]")
+        return
+    if not password:
+        print("[Login failed: password cannot be empty]")
+        return
+
+    try:
+        status = set_client_auth(username, password)
+        _display_response(
+            f"✅ Authenticated on `{status['urlbase']}` as `{status['username']}`."
+        )
+    except ValueError as e:
+        print(f"[Login failed: {e}]")
+    except Exception as e:
+        print(f"[Login failed: {type(e).__name__}: {e}]")
+
+
+def logout() -> None:
+    """Clear runtime Caterva2 authentication and return to anonymous mode."""
+    try:
+        status = clear_client_auth()
+        _display_response(
+            f"🔓 Logged out. Using anonymous access on `{status['urlbase']}`."
+        )
+    except Exception as e:
+        print(f"[Logout failed: {type(e).__name__}: {e}]")
+
+
+def auth_status() -> None:
+    """Display current Caterva2 authentication status."""
+    status = get_client_auth_status()
+    if status["authenticated"]:
+        _display_response(
+            "### 🔐 Caterva2 authentication status\n\n"
+            f"- Server: `{status['urlbase']}`\n"
+            "- Mode: `authenticated`\n"
+            f"- User: `{status['username']}`"
+        )
+        return
+
+    _display_response(
+        "### 🔓 Caterva2 authentication status\n\n"
+        f"- Server: `{status['urlbase']}`\n"
+        "- Mode: `anonymous`"
+    )
 
 
 # ---------------------------------------------------------------------------

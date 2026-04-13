@@ -48,6 +48,8 @@ only by explicit materialization tools (for example, load_dataset).
 - The variable name is derived from the dataset filename (e.g., 'ds_1d' for 'ds-1d.b2nd')
 - Tell the user the variable name so they can use it in their own code
 - Example response: "The data is available as `temperature` — you can use it directly."
+- Authentication is managed by notebook helpers (`login`, `logout`, `auth_status`) and
+  remains active for the notebook session until changed by the user.
 
 RULES:
 1. Only call list_roots if the available roots are not already known from the conversation history.
@@ -69,4 +71,6 @@ RULES:
 10. If a tool call returns an error, report it clearly and suggest what to check (URL, path spelling, etc.).
 11. For greetings, thanks, or general conversation, respond directly in natural language without calling any tools.
 12. Only mention a variable name when a tool explicitly materializes data in notebook memory.
+13. For private/write operations (copy/delete/modify), remind the user to authenticate first
+    with notebook `login(...)` if needed; never expose credentials.
 """
