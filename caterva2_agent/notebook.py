@@ -11,8 +11,7 @@ Key functions:
 - ask(message): Send a question to the agent, display response
 - reset(): Clear agent memory (start fresh conversation)
 - variables(): List agent-injected variables
-- login_interactive(username=None): Prompt hidden password auth
-- login(username, password): Authenticate Caterva2 client for this session
+- login(username=None): Prompt hidden password auth and authenticate session
 - logout(): Return Caterva2 client to anonymous mode
 - auth_status(): Show current Caterva2 authentication state
 
@@ -442,12 +441,33 @@ def variables() -> None:
 # AUTHENTICATION HELPERS
 # ---------------------------------------------------------------------------
 
-def login_interactive(username: str | None = None) -> None:
+def _login_with_credentials(username: str, password: str) -> None:
+    """Authenticate Caterva2 using explicit credentials."""
+    username_clean = username.strip()
+    if not username_clean:
+        print("[Login failed: username cannot be empty]")
+        return
+    if not password:
+        print("[Login failed: password cannot be empty]")
+        return
+
+    try:
+        status = set_client_auth(username_clean, password)
+        _display_response(
+            f"✅ Authenticated on `{status['urlbase']}` as `{status['username']}`."
+        )
+    except ValueError as e:
+        print(f"[Login failed: {e}]")
+    except Exception as e:
+        print(f"[Login failed: {type(e).__name__}: {e}]")
+
+
+def login(username: str | None = None) -> None:
     """
     Prompt for credentials and authenticate without echoing the password.
 
-    This is the recommended notebook authentication path because the password
-    is entered through a hidden prompt instead of cell source code.
+    This is the public notebook login API. Password is captured via hidden
+    prompt (`getpass`) so users do not place secrets in notebook cell source.
     """
     try:
         username_value = username.strip() if username is not None else input("Caterva2 username: ").strip()
@@ -465,32 +485,7 @@ def login_interactive(username: str | None = None) -> None:
         print("[Login cancelled]")
         return
 
-    login(username_value, password)
-
-
-def login(username: str, password: str) -> None:
-    """
-    Authenticate Caterva2 access for the current notebook session.
-
-    Credentials are kept in memory only and never written to disk.
-    """
-    username = username.strip()
-    if not username:
-        print("[Login failed: username cannot be empty]")
-        return
-    if not password:
-        print("[Login failed: password cannot be empty]")
-        return
-
-    try:
-        status = set_client_auth(username, password)
-        _display_response(
-            f"✅ Authenticated on `{status['urlbase']}` as `{status['username']}`."
-        )
-    except ValueError as e:
-        print(f"[Login failed: {e}]")
-    except Exception as e:
-        print(f"[Login failed: {type(e).__name__}: {e}]")
+    _login_with_credentials(username_value, password)
 
 
 def logout() -> None:

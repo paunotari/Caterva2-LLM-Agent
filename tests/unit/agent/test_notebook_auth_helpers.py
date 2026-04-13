@@ -19,51 +19,9 @@ if "IPython.display" not in sys.modules:
 from caterva2_agent import notebook
 
 
-def test_login_interactive_prompts_hidden_password_and_calls_login(monkeypatch) -> None:
-    # What this tests: interactive helper reads username + hidden password then delegates.
-    # Why important: keeps passwords out of notebook cells while reusing login flow.
-    captured: dict[str, tuple[str, str]] = {}
-
-    monkeypatch.setattr("builtins.input", lambda _prompt: "alice")
-    monkeypatch.setattr(notebook, "getpass", lambda _prompt: "secret")
-    monkeypatch.setattr(
-        notebook,
-        "login",
-        lambda username, password: captured.update({"credentials": (username, password)}),
-    )
-
-    notebook.login_interactive()
-
-    assert captured["credentials"] == ("alice", "secret")
-
-
-def test_login_interactive_uses_provided_username_without_prompt(monkeypatch) -> None:
-    # What this tests: optional username bypasses input prompt.
-    # Why important: allows scripted notebook flows with hidden password only.
-    captured: dict[str, tuple[str, str]] = {}
-    input_called = {"value": False}
-
-    def _unexpected_input(_prompt: str) -> str:
-        input_called["value"] = True
-        return "should-not-be-used"
-
-    monkeypatch.setattr("builtins.input", _unexpected_input)
-    monkeypatch.setattr(notebook, "getpass", lambda _prompt: "secret")
-    monkeypatch.setattr(
-        notebook,
-        "login",
-        lambda username, password: captured.update({"credentials": (username, password)}),
-    )
-
-    notebook.login_interactive("alice")
-
-    assert input_called["value"] is False
-    assert captured["credentials"] == ("alice", "secret")
-
-
-def test_login_success_calls_set_client_auth_and_displays_status(monkeypatch) -> None:
-    # What this tests: notebook login wires to runtime auth state manager.
-    # Why important: this is the user-facing entry point for authentication.
+def test_login_prompts_hidden_password_and_authenticates(monkeypatch) -> None:
+    # What this tests: public login uses input/getpass and authenticates session.
+    # Why important: ensures secure path is the default user API.
     captured: dict[str, tuple[str, str]] = {}
     outputs: list[str] = []
 
@@ -76,19 +34,56 @@ def test_login_success_calls_set_client_auth_and_displays_status(monkeypatch) ->
             "username": username,
         }
 
+    monkeypatch.setattr("builtins.input", lambda _prompt: "alice")
+    monkeypatch.setattr(notebook, "getpass", lambda _prompt: "secret")
     monkeypatch.setattr(notebook, "set_client_auth", _fake_set_client_auth)
     monkeypatch.setattr(notebook, "_display_response", outputs.append)
 
-    notebook.login(" alice ", "secret")
+    notebook.login()
 
     assert captured["credentials"] == ("alice", "secret")
     assert "Authenticated on `http://server.local` as `alice`" in outputs[0]
 
 
-def test_login_empty_password_prints_clear_error(capsys) -> None:
-    # What this tests: invalid input is rejected before touching client state.
-    # Why important: avoids accidental auth calls with malformed arguments.
-    notebook.login("alice", "")
+def test_login_uses_provided_username_without_prompt(monkeypatch) -> None:
+    # What this tests: optional username bypasses text input prompt.
+    # Why important: supports scripted login flows while keeping hidden password.
+    captured: dict[str, tuple[str, str]] = {}
+    input_called = {"value": False}
+
+    def _unexpected_input(_prompt: str) -> str:
+        input_called["value"] = True
+        return "should-not-be-used"
+
+    monkeypatch.setattr("builtins.input", _unexpected_input)
+    monkeypatch.setattr(notebook, "getpass", lambda _prompt: "secret")
+    monkeypatch.setattr(
+        notebook,
+        "set_client_auth",
+        lambda username, password: (
+            captured.update({"credentials": (username, password)})
+            or {
+                "status": "authenticated",
+                "urlbase": "http://server.local",
+                "authenticated": True,
+                "username": username,
+            }
+        ),
+    )
+    monkeypatch.setattr(notebook, "_display_response", lambda _msg: None)
+
+    notebook.login("alice")
+
+    assert input_called["value"] is False
+    assert captured["credentials"] == ("alice", "secret")
+
+
+def test_login_empty_password_prints_clear_error(monkeypatch, capsys) -> None:
+    # What this tests: empty hidden password is rejected before auth call.
+    # Why important: malformed secrets should not trigger server auth requests.
+    monkeypatch.setattr("builtins.input", lambda _prompt: "alice")
+    monkeypatch.setattr(notebook, "getpass", lambda _prompt: "")
+    notebook.login()
     captured = capsys.readouterr()
     assert "password cannot be empty" in captured.out
 
