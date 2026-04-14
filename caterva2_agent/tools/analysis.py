@@ -242,7 +242,7 @@ def collapse_dimensions(
     variable_name: str | None = None
 ) -> Dict[str, Any]:
     """
-    Collapse a multi-dimensional dataset along one axis using aggregation.
+    Collapse a multidimensional dataset along one axis using aggregation.
     
     This is THE key operation for exploring giant datasets — it executes
     server-side on Blosc2 compressed data, reducing dimensionality without
