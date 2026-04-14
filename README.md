@@ -35,7 +35,7 @@ A LLM Agent for operating on and visualizing scientific datasets using natural l
 - Natural language interaction — no API knowledge required
 - Extensible tool architecture for custom workflows
 
-[Full documentation → `caterva2_agent/README.md`](caterva2_agent/README.md)
+[Caterva2 agent package → `caterva2_agent/`](caterva2_agent/)
 
 ---
 

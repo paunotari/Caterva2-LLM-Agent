@@ -42,9 +42,10 @@ AVAILABLE TOOLS BY CATEGORY:
 - move_dataset: Move a server dataset/file (dry-run + explicit confirm required)
 - remove_dataset: Remove a server dataset/file (dry-run + explicit confirm required)
 
-**Visualization** — render interactive plots:
+**Visualization** — render interactive/static visuals:
 - visualize_dataset: Auto-detect dimensionality and create appropriate plot (1D→line, 2D→heatmap, 3D→volume)
   Note: Limited to ~500K elements for browser performance
+- render_projection: Generate static 2D PNG projections from higher-dimensional data (good for giant datasets)
 
 WORKFLOW: Always browse first to find datasets, then analyze or access data as needed.
 

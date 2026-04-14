@@ -21,7 +21,8 @@ from caterva2_agent.config import CATERVA2_URLBASE
 # ---------------------------------------------------------------------------
 # OBJECT REGISTRY FOR NOTEBOOK INTEGRATION
 # ---------------------------------------------------------------------------
-# When tools fetch data (get_slice, where_filter), they register results here.
+# When tools explicitly materialize derived/full data (for example, load_dataset
+# or collapse_dimensions), they register results here.
 # The notebook.py module reads this registry to inject variables into the
 # user's namespace. This decouples tool execution from notebook integration.
 
@@ -34,7 +35,7 @@ def register_fetched_object(path: str, data: Any) -> None:
     """
     Register a fetched object for later injection into notebook namespace.
     
-    Called by tools that retrieve data (get_slice, where_filter).
+    Called by tools that intentionally materialize data for notebook use.
     The notebook module reads this registry after agent.run() completes.
     
     Args:

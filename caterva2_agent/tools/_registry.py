@@ -7,7 +7,8 @@ This module:
 - Provides execute_tool() entry point for the agent loop
 
 Adding a new tool:
-1. Add schema to the appropriate category module (browsing.py, analysis.py, data_access.py)
+1. Add schema to the appropriate category module
+   (browsing.py, analysis.py, data_access.py, dataset_management.py, or visualization.py)
 2. Implement the function in that module
 3. Import and register it here in TOOL_MAP
 """
