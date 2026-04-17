@@ -634,7 +634,10 @@ def where_filter(
             operand = resolved.data
             if slices is not None:
                 if hasattr(operand, "slice"):
-                    operand = operand.slice(slice_tuple, as_blosc2=True)
+                    if resolved.is_server():
+                        operand = operand.slice(slice_tuple, as_blosc2=True)
+                    else:
+                        operand = operand.slice(slice_tuple)
                 else:
                     operand = operand[slice_tuple]
 

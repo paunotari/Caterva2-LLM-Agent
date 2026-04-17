@@ -49,7 +49,12 @@ def _ensure_local_import_bootstrap() -> None:
 
 _ensure_local_import_bootstrap()
 from caterva2_agent.tools import data_access
-from caterva2_agent.tools._base import ResolvedData, get_fetched_objects, clear_fetched_objects
+from caterva2_agent.tools._base import (
+    ResolvedData,
+    get_fetched_objects,
+    clear_fetched_objects,
+    set_notebook_namespace,
+)
 
 
 class _FakeDataset1D:
@@ -477,3 +482,21 @@ def test_where_filter_does_not_auto_register_server_data(monkeypatch) -> None:
 
     assert "error" not in result
     assert get_fetched_objects() == {}
+
+
+def test_where_filter_local_numpy_input_uses_blosc2_path() -> None:
+    # What this tests: local NumPy inputs are normalized and filtered via Blosc2-native path.
+    # Why important: migration goal is Blosc2-first internal execution.
+    local_np = np.arange(10, dtype=np.int64)
+    set_notebook_namespace({"local_np": local_np})
+
+    result = data_access.where_filter(
+        path="local_np",
+        operator=">",
+        threshold=5,
+        slices="0:10"
+    )
+
+    assert "error" not in result
+    assert result["execution_mode"] == "blosc2_where"
+    assert result["match_summary"]["matched"] == 4
