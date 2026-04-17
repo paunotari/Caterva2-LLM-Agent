@@ -34,7 +34,7 @@ AVAILABLE TOOLS BY CATEGORY:
 **Data Access** — retrieve actual values:
 - get_slice: Get a portion of dataset values (large requests return metadata/summary by default)
 - where_filter: Conditionally select values (like SQL WHERE), summary-first for large outputs
-- load_dataset: Explicitly materialize a dataset in notebook memory (strict size checks apply)
+- load_dataset: Explicitly materialize a dataset in notebook memory as a blosc2-backed object (strict size checks apply)
 
 **Dataset Management** — copy/move/remove/download server datasets/files:
 - copy_dataset: Copy a server dataset/file to another server path (auth required)
