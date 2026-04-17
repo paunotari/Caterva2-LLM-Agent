@@ -10,9 +10,7 @@ Tools in this module:
 import logging
 from typing import Dict, Any
 
-import numpy as np
-
-from ._base import _get_client, get_notebook_namespace
+from ._base import _get_client, resolve_data, _to_json_safe
 from caterva2_agent.config import CATERVA2_URLBASE
 
 logger = logging.getLogger('caterva2_agent')
@@ -174,7 +172,7 @@ def get_dataset_info(path: str) -> Dict[str, Any]:
     Retrieve metadata for a dataset or local variable.
 
     For server datasets: returns full metadata (shape, dtype, chunks, compression, etc.)
-    For local variables: returns basic numpy metadata (shape, dtype, size, memory)
+    For local variables: returns array metadata (shape, dtype, size, memory)
 
     Args:
         path: Server dataset path (e.g. '@public/examples/ds-2d-fields.b2nd')
@@ -186,47 +184,46 @@ def get_dataset_info(path: str) -> Dict[str, Any]:
     is_local = not path.startswith("@")
     
     if is_local:
-        # --- Local variable: basic numpy info ---
+        # --- Local variable: metadata via unified resolver ---
         logger.info(f"Fetching info for local variable: '{path}'")
         
         try:
-            namespace = get_notebook_namespace()
-            if namespace is None:
-                logger.warning(f"No notebook namespace available for variable '{path}'")
-                return {"error": f"No notebook namespace available. Cannot access local variable '{path}'."}
+            resolved = resolve_data(path)
+            arr = resolved.data
+            dtype_obj = getattr(arr, "dtype", None)
+            itemsize = getattr(dtype_obj, "itemsize", None)
+            size = int(getattr(arr, "size", 0))
+            nbytes = getattr(arr, "nbytes", None)
+            if nbytes is None and itemsize is not None:
+                nbytes = int(size * int(itemsize))
 
-            if path not in namespace:
-                logger.warning(f"Local variable '{path}' not found in notebook namespace")
-                return {"error": f"Local variable '{path}' not found in notebook namespace."}
-
-            obj = namespace[path]
-
-            # Ensure it's array-like
-            if not hasattr(obj, 'shape'):
-                logger.warning(f"Variable '{path}' is not array-like (type: {type(obj).__name__})")
-                return {"error": f"Variable '{path}' is not array-like (no shape attribute)."}
-            
-            arr = np.asarray(obj)
-            
             info = {
                 "name": path,
                 "source": "local variable",
                 "shape": list(arr.shape),
-                "ndim": arr.ndim,
+                "ndim": int(getattr(arr, "ndim", len(arr.shape))),
                 "dtype": str(arr.dtype),
-                "size": int(arr.size),
-                "itemsize": int(arr.itemsize),
-                "nbytes": int(arr.nbytes),
-                "memory_mb": round(arr.nbytes / (1024 * 1024), 2),
+                "size": size,
+                "itemsize": int(itemsize) if itemsize is not None else None,
+                "nbytes": int(nbytes) if nbytes is not None else None,
+                "memory_mb": round(int(nbytes) / (1024 * 1024), 2) if nbytes is not None else None,
+                "backend": resolved.backend,
             }
             
-            # Add stats for numeric arrays
-            if np.issubdtype(arr.dtype, np.number) and arr.size > 0:
-                info["min"] = float(np.nanmin(arr))
-                info["max"] = float(np.nanmax(arr))
-                info["mean"] = float(np.nanmean(arr))
+            # Add stats when backend supports reductions for this dtype.
+            if size > 0 and all(hasattr(arr, stat) for stat in ("min", "max", "mean")):
+                try:
+                    info["min"] = _to_json_safe(arr.min())
+                    info["max"] = _to_json_safe(arr.max())
+                    info["mean"] = _to_json_safe(arr.mean())
+                except (TypeError, ValueError):
+                    # Non-numeric or unsupported reductions.
+                    pass
             
             return {"path": path, "info": info}
+        except ValueError as e:
+            logger.warning(f"Validation error for local variable '{path}': {e}")
+            return {"error": str(e)}
         
         except Exception as e:
             logger.error(f"Failed to get metadata for local variable '{path}': {e}")
