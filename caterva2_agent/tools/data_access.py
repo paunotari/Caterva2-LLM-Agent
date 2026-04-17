@@ -14,6 +14,8 @@ Works with both:
 import logging
 from typing import Dict, Any
 
+import blosc2
+
 logger = logging.getLogger('caterva2_agent')
 
 from ._base import resolve_data, _to_json_safe, register_fetched_object
@@ -165,7 +167,7 @@ DATA_ACCESS_TOOLS = [
                     "SAFETY: This is explicit materialization and enforces strict size checks "
                     "(including a 100MB cap) before loading. "
                     "For large datasets, the tool suggests slice/filter/projection workflows. "
-                    "The loaded data becomes available as a numpy array variable in the notebook. "
+                    "The loaded data becomes available as a blosc2-backed variable in the notebook. "
                     "Works with both server datasets (@path) and local variables (variable_name)."
                 ),
             "parameters": {
@@ -304,10 +306,32 @@ def _generate_preview(data, max_chars: int = 200) -> str:
     
     Shows the structure without overwhelming the output.
     """
-    full_str = str(data.tolist() if hasattr(data, 'tolist') else data)
+    preview_obj = data
+
+    # For large arrays, preview only a tiny corner instead of full materialization.
+    if hasattr(data, "shape") and hasattr(data, "__getitem__"):
+        shape = tuple(getattr(data, "shape", ()))
+        if shape and _shape_product(shape) > 64:
+            ndim = len(shape)
+            per_dim = max(1, int(round(64 ** (1.0 / ndim))))
+            preview_key = tuple(slice(0, min(int(dim), per_dim)) for dim in shape)
+            try:
+                preview_obj = data[preview_key]
+            except Exception:
+                preview_obj = data
+
+    full_str = str(_to_json_safe(preview_obj))
     if len(full_str) <= max_chars:
         return full_str
     return full_str[:max_chars] + "..."
+
+
+def _shape_product(shape: tuple[int, ...] | list[int]) -> int:
+    """Compute number of elements from a shape tuple/list."""
+    total = 1
+    for dim in shape:
+        total *= int(dim)
+    return total
 
 
 def _compute_summary(data) -> Dict[str, Any]:
@@ -317,34 +341,39 @@ def _compute_summary(data) -> Dict[str, Any]:
     Pre-computes stats so the LLM can present a summary without
     showing all raw values. Also prepares for future viz tools.
     """
-    import numpy as np
-    
-    arr = np.asarray(data)
-    num_elements = arr.size
+    num_elements = int(getattr(data, "size", 1))
     
     summary = {
         "num_elements": num_elements,
-        "preview": _generate_preview(arr),
+        "preview": _generate_preview(data),
     }
     
-    # Only compute numeric stats for numeric dtypes
-    if np.issubdtype(arr.dtype, np.number):
-        summary["min"] = _to_json_safe(arr.min())
-        summary["max"] = _to_json_safe(arr.max())
-        summary["mean"] = _to_json_safe(arr.mean())
+    # Compute numeric-like stats when backend supports these reductions.
+    if all(hasattr(data, stat) for stat in ("min", "max", "mean")):
+        try:
+            summary["min"] = _to_json_safe(data.min())
+            summary["max"] = _to_json_safe(data.max())
+            summary["mean"] = _to_json_safe(data.mean())
+        except (TypeError, ValueError):
+            pass
     
     return summary
 
 
 def _estimate_nbytes(num_elements: int, dtype: Any) -> int | None:
     """Estimate payload size in bytes from element count and dtype."""
-    import numpy as np
-
+    itemsize = getattr(dtype, "itemsize", None)
+    if itemsize is None:
+        try:
+            probe = blosc2.zeros((1,), dtype=dtype)
+            itemsize = probe.dtype.itemsize
+        except Exception:
+            return None
     try:
-        itemsize = np.dtype(dtype).itemsize
+        itemsize_int = int(itemsize)
     except (TypeError, ValueError):
         return None
-    return int(num_elements) * int(itemsize)
+    return int(num_elements) * itemsize_int
 
 
 def _operation_warning(estimated_elements: int, estimated_nbytes: int | None) -> str | None:
@@ -367,34 +396,26 @@ def _operation_warning(estimated_elements: int, estimated_nbytes: int | None) ->
     )
 
 
-def _materialize_to_numpy(value: Any) -> Any:
+def _materialize_backend_value(value: Any) -> Any:
     """
-    Materialize Caterva2/LazyExpr-like values to a NumPy array when possible.
+    Materialize Caterva2/LazyExpr-like values while keeping Blosc2-backed data.
 
-    This helper lets where_filter try server-side expression execution first,
-    then materialize only for summaries / optional inline data.
+    This helper avoids eager NumPy conversion and keeps internal computation
+    in backends that support compressed operations.
     """
-    import numpy as np
-
-    if isinstance(value, np.ndarray):
-        return value
-
     if hasattr(value, "compute"):
-        return np.asarray(value.compute())
-
-    if hasattr(value, "__array__"):
-        return np.asarray(value)
+        return value.compute()
 
     if hasattr(value, "slice"):
         try:
-            return np.asarray(value.slice(slice(None), as_blosc2=False))
+            return value.slice(slice(None), as_blosc2=True)
         except Exception:
             pass
 
     try:
-        return np.asarray(value[:])
+        return value[:]
     except Exception:
-        return np.asarray(value)
+        return value
 
 
 # ---------------------------------------------------------------------------
@@ -537,9 +558,8 @@ def where_filter(
     - value_if_false where the condition is not met
     
     Execution strategy:
-    - Local variables: NumPy local path
-    - Server datasets: attempt Caterva2 server-side expression + where path first;
-      fallback to local NumPy if that capability is unavailable.
+    - Prefer backend-native where execution for both server and local data.
+    - Fallback to generic array backend only when native where is unavailable.
     
     Use cases:
     - Thresholding: elevation > 3000 → show peaks, mask valleys
@@ -607,50 +627,52 @@ def where_filter(
         logger.debug(f"Estimated elements: {estimated_size}")
         
         compare_fn = COMPARISON_OPERATORS[operator]
-        import numpy as np
         v_false = 0 if value_if_false is None else value_if_false
-        execution_mode = "local_numpy"
+        execution_mode = "blosc2_where"
 
-        # Server datasets: try server-side where first.
-        if resolved.is_server():
-            try:
-                server_operand = resolved.data
-                if slices is not None:
-                    if not hasattr(server_operand, "slice"):
-                        raise AttributeError("Dataset.slice() is unavailable")
-                    server_operand = server_operand.slice(slice_tuple, as_blosc2=True)
+        try:
+            operand = resolved.data
+            if slices is not None:
+                if hasattr(operand, "slice"):
+                    operand = operand.slice(slice_tuple, as_blosc2=True)
+                else:
+                    operand = operand[slice_tuple]
 
-                condition_obj = compare_fn(server_operand, threshold)
-                if not hasattr(condition_obj, "where"):
-                    raise AttributeError("Condition object has no where() method")
+            condition_obj = compare_fn(operand, threshold)
+            if not hasattr(condition_obj, "where"):
+                raise AttributeError("Condition object has no where() method")
 
-                v_true_server = server_operand if value_if_true is None else value_if_true
-                result_obj = condition_obj.where(v_true_server, v_false)
-
-                condition = np.asarray(_materialize_to_numpy(condition_obj), dtype=bool)
-                result_data = np.asarray(_materialize_to_numpy(result_obj))
+            v_true = operand if value_if_true is None else value_if_true
+            result_obj = condition_obj.where(v_true, v_false)
+            condition_data = _materialize_backend_value(condition_obj)
+            result_data = _materialize_backend_value(result_obj)
+            if resolved.is_server():
                 execution_mode = "server_where"
-            except Exception as e:
-                logger.warning(
-                    f"Server-side where unavailable for '{path}' ({type(e).__name__}: {e}); "
-                    "falling back to local NumPy."
-                )
-                data_slice = resolved[slice_tuple]
-                condition = compare_fn(data_slice, threshold)
-                v_true_local = data_slice if value_if_true is None else value_if_true
-                result_data = np.where(condition, v_true_local, v_false)
-        else:
+        except Exception as e:
+            logger.warning(
+                f"Native where unavailable for '{path}' ({type(e).__name__}: {e}); "
+                "falling back to generic array backend."
+            )
             data_slice = resolved[slice_tuple]
-            condition = compare_fn(data_slice, threshold)
-            v_true_local = data_slice if value_if_true is None else value_if_true
-            result_data = np.where(condition, v_true_local, v_false)
+            condition_data = compare_fn(data_slice, threshold)
+            v_true = data_slice if value_if_true is None else value_if_true
+            if hasattr(condition_data, "where"):
+                result_data = condition_data.where(v_true, v_false)
+            else:
+                import numpy as np
+                result_data = np.where(condition_data, v_true, v_false)
+            execution_mode = "local_numpy"
         
         # Compute summary statistics
         summary = _compute_summary(result_data)
         
         # Count how many elements matched the condition
-        num_matched = int(np.sum(condition))
-        num_total = int(condition.size)
+        num_total = int(getattr(condition_data, "size", estimated_size))
+        if hasattr(condition_data, "sum"):
+            num_matched = int(_to_json_safe(condition_data.sum()))
+        else:
+            import numpy as np
+            num_matched = int(np.sum(condition_data))
         match_percentage = (num_matched / num_total * 100) if num_total > 0 else 0
         
         result = {
@@ -660,7 +682,7 @@ def where_filter(
             "dtype": str(resolved.dtype),
             "condition": f"data {operator} {threshold}",
             "slice_applied": slice_str_used,
-            "result_shape": list(result_data.shape),
+            "result_shape": list(getattr(result_data, "shape", ())),
             "estimated_elements": int(estimated_size),
             "value_if_true": "original_data" if value_if_true is None else value_if_true,
             "value_if_false": v_false,
@@ -716,7 +738,7 @@ def load_dataset(path: str) -> Dict[str, Any]:
     Load an entire dataset into the notebook for manipulation.
     
     This is the explicit "I want all of this data" tool. It loads the complete
-    dataset (after decompression if from Caterva2) into memory as a numpy array.
+    dataset into notebook memory as a backend array object (Blosc2-first).
     
     Safety: This is explicit materialization. Enforces strict size checks including
     an explicit 100MB cap for notebook loading.
@@ -734,10 +756,8 @@ def load_dataset(path: str) -> Dict[str, Any]:
     logger.info(f"Loading full {source_type}: '{path}'")
     
     try:
-        import numpy as np
-
         resolved = resolve_data(path)
-        total_elements = int(np.prod(resolved.shape))
+        total_elements = _shape_product(resolved.shape)
         estimated_nbytes = _estimate_nbytes(total_elements, resolved.dtype)
 
         if total_elements > LOAD_DATASET_MAX_ELEMENTS:
@@ -770,13 +790,30 @@ def load_dataset(path: str) -> Dict[str, Any]:
                 )
             }
 
-        # Materialize explicitly
-        data = resolved[:] if not resolved.is_local() else resolved.data
-        data = np.asarray(data)
+        # Materialize explicitly while keeping Blosc2-backed representation.
+        if resolved.is_local():
+            data = resolved.data
+        else:
+            full_slice = tuple(slice(None) for _ in resolved.shape)
+            if hasattr(resolved.data, "slice"):
+                data = resolved.data.slice(full_slice, as_blosc2=True)
+            else:
+                data = resolved[full_slice]
+                if not isinstance(data, blosc2.NDArray) and hasattr(data, "shape"):
+                    data = blosc2.asarray(data)
 
         # Final guard using actual in-memory size
-        if data.nbytes > LOAD_DATASET_MAX_BYTES:
-            actual_mb = data.nbytes / (1024 * 1024)
+        data_nbytes = getattr(data, "nbytes", None)
+        if data_nbytes is None:
+            data_nbytes = _estimate_nbytes(int(getattr(data, "size", total_elements)), getattr(data, "dtype", resolved.dtype))
+        if data_nbytes is None:
+            return {
+                "error": "Could not estimate materialized size for loaded dataset.",
+                "shape": list(getattr(data, "shape", resolved.shape)),
+                "dtype": str(getattr(data, "dtype", resolved.dtype)),
+            }
+        if data_nbytes > LOAD_DATASET_MAX_BYTES:
+            actual_mb = data_nbytes / (1024 * 1024)
             return {
                 "error": (
                     f"Materialized array size is {actual_mb:.2f} MB, exceeding "
@@ -797,11 +834,12 @@ def load_dataset(path: str) -> Dict[str, Any]:
             register_fetched_object(path, data)
             registered = True
 
-        size_bytes = int(data.nbytes)
+        size_bytes = int(data_nbytes)
         size_mb = round(size_bytes / (1024 * 1024), 2)
+        data_size = int(getattr(data, "size", total_elements))
 
         logger.debug(f"✓ Loaded: shape={list(data.shape)}, dtype={data.dtype}")
-        logger.debug(f"Size: {size_mb} MB ({data.size:,} elements)")
+        logger.debug(f"Size: {size_mb} MB ({data_size:,} elements)")
         if registered:
             logger.debug("📦 Available in notebook for manipulation")
         
@@ -816,17 +854,18 @@ def load_dataset(path: str) -> Dict[str, Any]:
             "dtype": str(data.dtype),
             "size_bytes": size_bytes,
             "size_mb": size_mb,
-            "num_elements": data.size,
+            "num_elements": data_size,
+            "backend": "blosc2" if isinstance(data, blosc2.NDArray) else type(data).__name__,
             "summary": summary,
             "registered_in_notebook": registered
         }
         
         # Include full data only for very small payloads
-        if data.size <= LLM_INLINE_DATA_MAX_ELEMENTS:
+        if data_size <= LLM_INLINE_DATA_MAX_ELEMENTS:
             result["data"] = _to_json_safe(data)
         else:
             result["note"] = (
-                f"Data has {data.size:,} elements — returning summary only to protect LLM context. "
+                f"Data has {data_size:,} elements — returning summary only to protect LLM context. "
                 f"The dataset is materialized in notebook memory via load_dataset."
             )
         

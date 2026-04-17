@@ -30,7 +30,7 @@ logger = logging.getLogger("caterva2_agent")
 # The notebook.py module reads this registry to inject variables into the
 # user's namespace. This decouples tool execution from notebook integration.
 
-# Format: {"@public/path/to/dataset.b2nd": <numpy array>, ...}
+# Format: {"@public/path/to/dataset.b2nd": <array-like object>, ...}
 # Keys are full dataset paths for traceability.
 _fetched_objects: dict[str, Any] = {}
 
@@ -44,7 +44,7 @@ def register_fetched_object(path: str, data: Any) -> None:
     
     Args:
         path: Full dataset path (e.g. '@public/examples/ds-1d.b2nd')
-        data: The fetched data (typically a numpy array)
+        data: The fetched data (typically a blosc2-backed array)
     """
     _fetched_objects[path] = data
 
@@ -256,7 +256,7 @@ def _get_dataset(path: str) -> cat2.Dataset:
 
 @runtime_checkable
 class ArrayLike(Protocol):
-    """Protocol for array-like objects (numpy, blosc2, etc.)."""
+    """Protocol for array-like objects (blosc2, numpy, etc.)."""
     shape: tuple[int, ...]
     dtype: Any
     def __getitem__(self, key) -> Any: ...
@@ -266,7 +266,7 @@ class ResolvedData:
     """
     Container for resolved data with unified interface.
     
-    Wraps both Caterva2 Dataset objects and local numpy arrays to provide
+    Wraps Caterva2 Dataset objects and local array-like values to provide
     a consistent interface for tools.
     """
     
@@ -281,7 +281,7 @@ class ResolvedData:
     ):
         """
         Args:
-            data: The actual data (Dataset or ndarray)
+            data: The actual data (Dataset or array-like object)
             source: 'server' or 'local'
             name: Original path or variable name
             backend: Data backend identifier ('caterva2', 'blosc2', etc.)
@@ -437,14 +437,12 @@ def fetch_and_register_data(
     
     Returns:
         Tuple of (data_array, metadata_dict)
-        - data_array: The fetched numpy array
+        - data_array: The fetched array-like object (Blosc2-first)
         - metadata_dict: Info about the fetch (shape, size, etc.)
     
     Raises:
         ValueError: If data exceeds max_elements or other validation fails
     """
-    import numpy as np
-    
     # Resolve the data source
     resolved = resolve_data(path)
     is_local = resolved.source == 'local'
@@ -452,22 +450,43 @@ def fetch_and_register_data(
     # Determine what to fetch
     if slice_spec is None:
         # Full dataset - check size first
-        total_elements = np.prod(resolved.shape)
+        total_elements = 1
+        for dim in resolved.shape:
+            total_elements *= int(dim)
         if total_elements > max_elements:
             raise ValueError(
                 f"Dataset has {total_elements:,} elements, exceeding limit of {max_elements:,}. "
                 f"Use slices to fetch a smaller region."
             )
-        data = resolved[:] if not is_local else resolved.data
+        if is_local:
+            data = resolved.data
+        elif hasattr(resolved.data, "slice"):
+            full_slice = tuple(slice(None) for _ in resolved.shape)
+            data = resolved.data.slice(full_slice, as_blosc2=True)
+        else:
+            data = resolved[:]
     else:
         # Sliced region
-        data = resolved[slice_spec]
-    
-    # Ensure it's a numpy array
-    data = np.asarray(data)
+        if not is_local and hasattr(resolved.data, "slice"):
+            data = resolved.data.slice(slice_spec, as_blosc2=True)
+        else:
+            data = resolved[slice_spec]
+
+    if not isinstance(data, blosc2.NDArray) and hasattr(data, "shape"):
+        try:
+            data = blosc2.asarray(data)
+        except Exception:
+            # Keep original representation if conversion is unavailable.
+            pass
     
     # Calculate size for metadata
-    data_size_bytes = data.nbytes
+    data_size_bytes = getattr(data, "nbytes", None)
+    if data_size_bytes is None:
+        data_size_bytes = 0
+        itemsize = getattr(getattr(data, "dtype", None), "itemsize", None)
+        size = getattr(data, "size", None)
+        if itemsize is not None and size is not None:
+            data_size_bytes = int(itemsize) * int(size)
     data_size_mb = data_size_bytes / (1024 * 1024)
     
     # Register for notebook injection (only for server datasets)
@@ -495,11 +514,11 @@ def _to_json_safe(value) -> Any:
     """
     Convert numpy/blosc2 values to JSON-serializable Python types.
     
-    Statistical methods and slicing return numpy scalars or arrays — these must be
-    converted to native Python types for JSON serialization.
+    Statistical methods and slicing may return NumPy scalars/arrays — these must
+    be converted to native Python types for JSON serialization.
     
     Args:
-        value: Any value (numpy array, scalar, or native Python type)
+        value: Any value (array, scalar, or native Python type)
     
     Returns:
         JSON-serializable equivalent
@@ -509,6 +528,11 @@ def _to_json_safe(value) -> Any:
     if isinstance(value, blosc2.NDArray):
         # NDArray slicing yields a NumPy array/scalar which we can serialize safely.
         return _to_json_safe(value[:])
+    if hasattr(value, "__array__"):
+        try:
+            return _to_json_safe(np.asarray(value))
+        except Exception:
+            pass
     if isinstance(value, (np.ndarray,)):
         return value.tolist()
     if isinstance(value, (np.integer,)):
