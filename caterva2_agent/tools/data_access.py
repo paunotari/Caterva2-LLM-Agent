@@ -341,7 +341,12 @@ def _compute_summary(data) -> Dict[str, Any]:
     Pre-computes stats so the LLM can present a summary without
     showing all raw values. Also prepares for future viz tools.
     """
-    num_elements = int(getattr(data, "size", 1))
+    num_elements_attr = getattr(data, "size", None)
+    if num_elements_attr is not None:
+        num_elements = int(num_elements_attr)
+    else:
+        shape = tuple(getattr(data, "shape", ()))
+        num_elements = _shape_product(shape) if shape else 1
     
     summary = {
         "num_elements": num_elements,
@@ -793,17 +798,14 @@ def load_dataset(path: str) -> Dict[str, Any]:
                 )
             }
 
-        # Materialize explicitly while keeping Blosc2-backed representation.
+        # Materialize explicitly while keeping backend-native representation.
         if resolved.is_local():
             data = resolved.data
         else:
-            full_slice = tuple(slice(None) for _ in resolved.shape)
-            if hasattr(resolved.data, "slice"):
-                data = resolved.data.slice(full_slice, as_blosc2=True)
-            else:
-                data = resolved[full_slice]
-                if not isinstance(data, blosc2.NDArray) and hasattr(data, "shape"):
-                    data = blosc2.asarray(data)
+            # Keep the server dataset handle directly. Creating a full NDArray
+            # via .slice(..., as_blosc2=True) can crash in backend reductions
+            # (observed as kernel segfaults when computing summary stats).
+            data = resolved.data
 
         # Final guard using actual in-memory size
         data_nbytes = getattr(data, "nbytes", None)
@@ -865,7 +867,12 @@ def load_dataset(path: str) -> Dict[str, Any]:
         
         # Include full data only for very small payloads
         if data_size <= LLM_INLINE_DATA_MAX_ELEMENTS:
-            result["data"] = _to_json_safe(data)
+            full_slice = tuple(slice(None) for _ in data.shape) if hasattr(data, "shape") else slice(None)
+            try:
+                inline_data = data[full_slice]
+            except Exception:
+                inline_data = data
+            result["data"] = _to_json_safe(inline_data)
         else:
             result["note"] = (
                 f"Data has {data_size:,} elements — returning summary only to protect LLM context. "

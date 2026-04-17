@@ -14,7 +14,7 @@ from typing import Dict, Any
 
 logger = logging.getLogger('caterva2_agent')
 
-from ._base import resolve_data, _to_json_safe
+from ._base import resolve_data, _to_json_safe, register_fetched_object
 
 
 # ---------------------------------------------------------------------------
@@ -283,8 +283,6 @@ def collapse_dimensions(
     logger.debug(f"Operation: {operation} along axis={axis}")
     
     try:
-        from ._base import register_fetched_object
-        
         resolved = resolve_data(path)
         data = resolved.data
         shape = resolved.shape
