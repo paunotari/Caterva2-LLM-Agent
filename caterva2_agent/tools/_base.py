@@ -11,12 +11,16 @@ This module provides:
 These are shared across browsing, analysis, and data_access tools.
 """
 
+import logging
 from typing import Any, Protocol, runtime_checkable
 
+import blosc2
 import caterva2 as cat2
 from caterva2 import Client
 
 from caterva2_agent.config import CATERVA2_URLBASE
+
+logger = logging.getLogger("caterva2_agent")
 
 # ---------------------------------------------------------------------------
 # OBJECT REGISTRY FOR NOTEBOOK INTEGRATION
@@ -266,16 +270,28 @@ class ResolvedData:
     a consistent interface for tools.
     """
     
-    def __init__(self, data: Any, source: str, name: str):
+    def __init__(
+        self,
+        data: Any,
+        source: str,
+        name: str,
+        *,
+        backend: str | None = None,
+        normalized_from: str | None = None,
+    ):
         """
         Args:
             data: The actual data (Dataset or ndarray)
             source: 'server' or 'local'
             name: Original path or variable name
+            backend: Data backend identifier ('caterva2', 'blosc2', etc.)
+            normalized_from: Original local type name if data was normalized
         """
         self.data = data
         self.source = source
         self.name = name
+        self.backend = backend or _infer_backend(data, source)
+        self.normalized_from = normalized_from
     
     @property
     def shape(self) -> tuple[int, ...]:
@@ -293,6 +309,47 @@ class ResolvedData:
     
     def is_server(self) -> bool:
         return self.source == 'server'
+
+    def is_local_blosc2(self) -> bool:
+        return self.is_local() and self.backend == "blosc2"
+
+
+def _infer_backend(data: Any, source: str) -> str:
+    """Infer the backend used by this resolved object."""
+    if source == "server":
+        return "caterva2"
+    if isinstance(data, blosc2.NDArray):
+        return "blosc2"
+    return type(data).__name__.lower()
+
+
+def _normalize_local_array(value: Any, variable_name: str) -> tuple[Any, str | None]:
+    """
+    Normalize local inputs to blosc2.NDArray for Blosc2-first internal execution.
+
+    Returns:
+        (normalized_value, normalized_from_type_name_or_none)
+    """
+    if isinstance(value, blosc2.NDArray):
+        return value, None
+
+    source_type = type(value).__name__
+    try:
+        normalized = blosc2.asarray(value)
+    except Exception as e:
+        raise ValueError(
+            f"Variable '{variable_name}' could not be converted to a blosc2 NDArray "
+            f"from type '{source_type}': {e}"
+        ) from e
+
+    logger.debug(
+        "Normalized local variable '%s' from %s to blosc2 NDArray (shape=%s, dtype=%s)",
+        variable_name,
+        source_type,
+        getattr(normalized, "shape", "unknown"),
+        getattr(normalized, "dtype", "unknown"),
+    )
+    return normalized, source_type
 
 
 def resolve_data(path_or_name: str) -> ResolvedData:
@@ -344,10 +401,17 @@ def resolve_data(path_or_name: str) -> ResolvedData:
         raise ValueError(
             f"Variable '{path_or_name}' is not array-like "
             f"(type: {type(value).__name__}). "
-            "Only numpy arrays and similar objects are supported."
+            "Only NumPy, blosc2 NDArray, and similar array-like objects are supported."
         )
-    
-    return ResolvedData(value, source='local', name=path_or_name)
+
+    normalized_value, normalized_from = _normalize_local_array(value, path_or_name)
+    return ResolvedData(
+        normalized_value,
+        source='local',
+        name=path_or_name,
+        backend='blosc2',
+        normalized_from=normalized_from,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -441,7 +505,10 @@ def _to_json_safe(value) -> Any:
         JSON-serializable equivalent
     """
     import numpy as np
-    
+
+    if isinstance(value, blosc2.NDArray):
+        # NDArray slicing yields a NumPy array/scalar which we can serialize safely.
+        return _to_json_safe(value[:])
     if isinstance(value, (np.ndarray,)):
         return value.tolist()
     if isinstance(value, (np.integer,)):
