@@ -11,7 +11,6 @@ Works with both:
 
 import logging
 from typing import Dict, Any
-import numpy as np
 
 logger = logging.getLogger('caterva2_agent')
 
@@ -30,6 +29,14 @@ SUPPORTED_STATS = {"min", "max", "mean", "sum", "std", "var", "argmin", "argmax"
 
 # Supported reduction operations for collapse_dimensions
 SUPPORTED_REDUCTIONS = {"min", "max", "mean", "sum", "std", "var", "prod"}
+
+
+def _shape_product(shape: tuple[int, ...] | list[int]) -> int:
+    """Compute number of elements from a shape tuple/list."""
+    total = 1
+    for dim in shape:
+        total *= int(dim)
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -204,24 +211,18 @@ def get_dataset_stats(
             "stats": {}
         }
 
-        # Compute each requested statistic
-        # For local numpy arrays, we need to use numpy functions
-        # For server datasets, we use the dataset methods
+        # Compute each requested statistic via backend-native array methods.
         for stat_name in stats_list:
-            if resolved.is_local():
-                # Use numpy functions for local arrays
-                if stat_name == "argmin":
-                    raw_value = np.argmin(data, axis=axis)
-                elif stat_name == "argmax":
-                    raw_value = np.argmax(data, axis=axis)
-                else:
-                    func = getattr(np, stat_name)
-                    raw_value = func(data, axis=axis)
-            else:
-                # Use dataset methods for server data
+            try:
                 method = getattr(data, stat_name)
                 raw_value = method(axis=axis)
-            
+            except AttributeError as e:
+                return {
+                    "error": (
+                        f"Statistic '{stat_name}' is not available on backend "
+                        f"'{resolved.backend}' for '{path}': {e}"
+                    )
+                }
             result["stats"][stat_name] = _to_json_safe(raw_value)
 
         return result
@@ -302,7 +303,7 @@ def collapse_dimensions(
         # Calculate expected output size
         expected_shape = list(shape)
         expected_shape.pop(axis)
-        expected_size = np.prod(expected_shape) if expected_shape else 1
+        expected_size = _shape_product(expected_shape) if expected_shape else 1
         
         # CRITICAL: Check if operation is feasible
         # For massive datasets, even the OUTPUT might be too large
@@ -333,22 +334,13 @@ def collapse_dimensions(
                 "note": "For truly massive datasets, consider pre-computed projections or tiled processing."
             }
         
-        # Execute the reduction
-        # For server datasets, this executes server-side on Blosc2
-        # For local arrays, uses numpy
-        if resolved.is_local():
-            # Local numpy array
-            reduction_func = getattr(np, operation)
-            result_array = reduction_func(data, axis=axis)
-        else:
-            # Server dataset - use native Caterva2 methods
-            method = getattr(data, operation)
-            result_array = method(axis=axis)
-        
-        # Convert to numpy for consistency (if not already)
-        result_array = np.asarray(result_array)
-        result_shape = result_array.shape
-        result_size = result_array.size
+        # Execute the reduction using backend-native methods.
+        method = getattr(data, operation)
+        result_data = method(axis=axis)
+
+        result_shape = tuple(getattr(result_data, "shape", ()))
+        result_size = int(getattr(result_data, "size", 1))
+        result_dtype = str(getattr(result_data, "dtype", type(result_data).__name__))
         
         logger.debug(f"Result shape: {result_shape}, size: {result_size:,} elements")
         
@@ -369,10 +361,16 @@ def collapse_dimensions(
         variable_name = variable_name.replace('@', '').replace('/', '_').replace('.', '_')
         
         # Register in notebook namespace
-        register_fetched_object(variable_name, result_array)
+        register_fetched_object(variable_name, result_data)
         
         logger.debug(f"✓ Stored as: '{variable_name}'")
         
+        data_min = None
+        data_max = None
+        if hasattr(result_data, "min") and hasattr(result_data, "max"):
+            data_min = _to_json_safe(result_data.min())
+            data_max = _to_json_safe(result_data.max())
+
         # Build response
         result = {
             "status": "success",
@@ -383,10 +381,10 @@ def collapse_dimensions(
             "result_shape": list(result_shape),
             "result_size": int(result_size),
             "variable_name": variable_name,
-            "dtype": str(result_array.dtype),
+            "dtype": result_dtype,
             "data_range": {
-                "min": _to_json_safe(np.min(result_array)),
-                "max": _to_json_safe(np.max(result_array))
+                "min": data_min,
+                "max": data_max,
             },
             "note": (
                 f"Result stored as '{variable_name}' in notebook. "
@@ -397,7 +395,7 @@ def collapse_dimensions(
         
         # Include a sample of the data if it's small enough
         if result_size <= 100:
-            result["preview"] = _to_json_safe(result_array)
+            result["preview"] = _to_json_safe(result_data)
         
         return result
     
