@@ -12,6 +12,7 @@ Works with both:
 """
 
 import logging
+from datetime import datetime, timezone
 from typing import Dict, Any
 
 import blosc2
@@ -103,6 +104,8 @@ DATA_ACCESS_TOOLS = [
                     "Example use case: for elevation data, filter peaks above 3000m by returning "
                     "the actual elevation where > 3000, and 0 (or NaN) elsewhere. "
                     "This is useful for masking, thresholding, or highlighting specific data regions. "
+                    "For authenticated server sessions, filtered results are auto-saved to "
+                    "a generated '@personal/where_filter/...' dataset path for chaining. "
                     "For large results, returns metadata + summary by default instead of full values. "
                     "To materialize full data into the notebook namespace, use load_dataset explicitly. "
                     "Works with both server datasets (@path) and local variables (variable_name)."
@@ -158,20 +161,12 @@ DATA_ACCESS_TOOLS = [
                             "Same syntax as get_slice. Highly recommended for large datasets."
                         )
                     },
-                    "save_path": {
-                        "type": "string",
-                        "description": (
-                            "Optional server path in '@personal/...' where the filtered result "
-                            "should be saved for chaining more server-side operations. "
-                            "Only supported for server datasets."
-                        )
-                    },
                     "compute": {
                         "type": "boolean",
                         "description": (
-                            "Only used when save_path is provided. "
+                            "Only used for server datasets when authenticated. "
                             "False (default): store lazy expression wrapper. "
-                            "True: compute and materialize result on server during upload."
+                            "True: compute and materialize result on server during auto-save."
                         )
                     }
                 },
@@ -569,6 +564,17 @@ COMPARISON_OPERATORS = {
 }
 
 
+def _build_default_where_save_path(path: str) -> str:
+    """Build a unique @personal path for persisted where_filter results."""
+    source_name = path.rsplit("/", 1)[-1] if "/" in path else path
+    stem = source_name.removesuffix(".b2nd").removesuffix(".b2frame")
+    sanitized = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in stem)
+    if not sanitized:
+        sanitized = "filtered"
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    return f"@personal/where_filter/{sanitized}_{timestamp}.b2nd"
+
+
 def where_filter(
     path: str,
     operator: str,
@@ -576,7 +582,6 @@ def where_filter(
     value_if_true: float | None = None,
     value_if_false: float | None = None,
     slices: str | None = None,
-    save_path: str | None = None,
     compute: bool = False,
 ) -> Dict[str, Any]:
     """
@@ -603,8 +608,9 @@ def where_filter(
         value_if_true: Value where condition is True (default: original data)
         value_if_false: Value where condition is False (default: 0)
         slices: Optional slice to limit the region (recommended for large datasets)
-        save_path: Optional '@personal/...' path to persist result server-side
-        compute: When persisting, execute expression immediately on server if True
+        compute: For server datasets with authenticated sessions, controls auto-save mode.
+                 False (default): keep lazy expression wrapper.
+                 True: compute and materialize result during upload.
     
     Returns:
         Dict with filtered data, condition info, and summary, or 'error' on failure.
@@ -624,43 +630,23 @@ def where_filter(
     logger.debug(f"Values: if_true={value_if_true or 'data'}, if_false={value_if_false or 0}")
     if slices:
         logger.debug(f"Slice: {slices}")
-    if save_path:
-        logger.debug(f"Persist result to: {save_path} (compute={compute})")
     
     try:
         resolved = resolve_data(path)
         shape = resolved.shape
 
         save_path_clean: str | None = None
-        if save_path is not None:
-            save_path_clean = save_path.strip()
-            if not save_path_clean:
-                return {"error": "'save_path' must be a non-empty string when provided."}
-            if resolved.is_local():
-                return {
-                    "error": (
-                        "save_path persistence is only supported when filtering a server dataset. "
-                        "For local variables, keep using the returned in-memory result."
-                    )
-                }
-            if not save_path_clean.startswith("@personal/"):
-                return {
-                    "error": (
-                        "save_path must target your writable personal root and start with "
-                        "'@personal/'."
-                    )
-                }
+        auto_save_requested = False
+        if resolved.is_server():
             auth_status = get_client_auth_status()
-            if not auth_status.get("authenticated"):
-                return {
-                    "error": (
-                        "Authentication required to persist where_filter results server-side. "
-                        "Run notebook `login(...)` and verify with `auth_status()`."
-                    ),
-                    "authenticated": False,
-                    "save_path": save_path_clean,
-                    "server": auth_status.get("urlbase"),
-                }
+            if auth_status.get("authenticated"):
+                save_path_clean = _build_default_where_save_path(path)
+                auto_save_requested = True
+            else:
+                logger.debug(
+                    "Skipping @personal auto-save for where_filter('%s') because session is not authenticated.",
+                    path,
+                )
         
         # Determine slice to apply.
         # If no slice is provided, run on full dataset by default.
@@ -695,6 +681,7 @@ def where_filter(
         execution_mode = "blosc2_where"
         result_obj: Any | None = None
         persisted_result_path: str | None = None
+        persistence_skipped_reason: str | None = None
 
         try:
             operand = resolved.data
@@ -733,38 +720,33 @@ def where_filter(
             execution_mode = "local_numpy"
 
         if save_path_clean is not None:
-            if execution_mode != "server_where" or result_obj is None:
-                return {
-                    "error": (
-                        "Could not persist filtered result on server because native server-side "
-                        "where execution was unavailable for this dataset/path."
-                    ),
-                    "path": path,
-                    "save_path": save_path_clean,
-                    "execution_mode": execution_mode,
-                }
-
-            try:
-                client = _get_client()
-                if client is None:
-                    raise RuntimeError("Caterva2 client is not available.")
-                persisted = client.upload(result_obj, save_path_clean, compute=compute)
-                persisted_result_path = (
-                    getattr(persisted, "path", None)
-                    or getattr(persisted, "name", None)
-                    or save_path_clean
+            if execution_mode == "server_where" and result_obj is not None:
+                try:
+                    client = _get_client()
+                    if client is None:
+                        raise RuntimeError("Caterva2 client is not available.")
+                    persisted = client.upload(result_obj, save_path_clean, compute=compute)
+                    persisted_result_path = (
+                        getattr(persisted, "path", None)
+                        or getattr(persisted, "name", None)
+                        or save_path_clean
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Failed to persist where_filter result to '%s': %s",
+                        save_path_clean,
+                        e,
+                    )
+                    return {
+                        "error": f"Failed to persist filtered result to '{save_path_clean}': {e}",
+                        "path": path,
+                        "save_path": save_path_clean,
+                    }
+            else:
+                persistence_skipped_reason = (
+                    "Native server-side where execution was unavailable; "
+                    "result was not auto-saved to @personal."
                 )
-            except Exception as e:
-                logger.error(
-                    "Failed to persist where_filter result to '%s': %s",
-                    save_path_clean,
-                    e,
-                )
-                return {
-                    "error": f"Failed to persist filtered result to '{save_path_clean}': {e}",
-                    "path": path,
-                    "save_path": save_path_clean,
-                }
         
         # Compute summary statistics
         summary = _compute_summary(result_data)
@@ -800,13 +782,28 @@ def where_filter(
         }
 
         if save_path_clean is not None:
-            result["stored_server_side"] = True
-            result["result_path"] = str(persisted_result_path)
-            result["compute_on_save"] = bool(compute)
-            result["server_change_applied"] = True
-            result["_next_step_hint"] = (
-                "Use result_path in follow-up server operations "
-                "(get_slice, collapse_dimensions, where_filter, visualize_dataset)."
+            if persisted_result_path is not None:
+                result["stored_server_side"] = True
+                result["result_path"] = str(persisted_result_path)
+                result["save_path"] = str(save_path_clean)
+                result["compute_on_save"] = bool(compute)
+                result["server_change_applied"] = True
+                result["auto_saved_to_personal"] = bool(auto_save_requested)
+                result["_next_step_hint"] = (
+                    "Use result_path in follow-up server operations "
+                    "(get_slice, collapse_dimensions, where_filter, visualize_dataset)."
+                )
+            else:
+                result["stored_server_side"] = False
+                result["auto_saved_to_personal"] = False
+                if persistence_skipped_reason:
+                    result["persistence_note"] = persistence_skipped_reason
+        elif resolved.is_server():
+            result["stored_server_side"] = False
+            result["auto_saved_to_personal"] = False
+            result["persistence_note"] = (
+                "Not auto-saved to @personal because this session is not authenticated. "
+                "Use notebook login(...) to enable default persistence."
             )
 
         if estimated_nbytes is not None:

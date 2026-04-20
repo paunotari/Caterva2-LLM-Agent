@@ -33,8 +33,8 @@ AVAILABLE TOOLS BY CATEGORY:
 
 **Data Access** — retrieve actual values:
 - get_slice: Get a portion of dataset values (large requests return metadata/summary by default)
-- where_filter: Conditionally select values (like SQL WHERE), summary-first for large outputs,
-  optionally persist result to @personal for server-side chaining
+- where_filter: Conditionally select values (like SQL WHERE), summary-first for large outputs;
+  for authenticated server sessions, result is auto-saved to @personal for chaining
 - load_dataset: Explicitly materialize a dataset in notebook memory as a blosc2-backed object (strict size checks apply)
 
 **Dataset Management** — copy/move/remove/download server datasets/files:
