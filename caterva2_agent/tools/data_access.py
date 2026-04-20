@@ -165,8 +165,8 @@ DATA_ACCESS_TOOLS = [
                         "type": "boolean",
                         "description": (
                             "Only used for server datasets when authenticated. "
-                            "False (default): store lazy expression wrapper. "
-                            "True: compute and materialize result on server during auto-save."
+                            "True (default): compute and materialize result on server during auto-save. "
+                            "False: store lazy expression wrapper."
                         )
                     }
                 },
@@ -582,7 +582,7 @@ def where_filter(
     value_if_true: float | None = None,
     value_if_false: float | None = None,
     slices: str | None = None,
-    compute: bool = False,
+    compute: bool = True,
 ) -> Dict[str, Any]:
     """
     Filter dataset or local variable values based on a condition.
@@ -609,8 +609,8 @@ def where_filter(
         value_if_false: Value where condition is False (default: 0)
         slices: Optional slice to limit the region (recommended for large datasets)
         compute: For server datasets with authenticated sessions, controls auto-save mode.
-                 False (default): keep lazy expression wrapper.
-                 True: compute and materialize result during upload.
+                 True (default): compute and materialize result during upload.
+                 False: keep lazy expression wrapper.
     
     Returns:
         Dict with filtered data, condition info, and summary, or 'error' on failure.
@@ -679,6 +679,7 @@ def where_filter(
         compare_fn = COMPARISON_OPERATORS[operator]
         v_false = 0 if value_if_false is None else value_if_false
         execution_mode = "blosc2_where"
+        operand_for_counts: Any | None = None
         result_obj: Any | None = None
         persisted_result_path: str | None = None
         persistence_skipped_reason: str | None = None
@@ -694,13 +695,13 @@ def where_filter(
                 else:
                     operand = operand[slice_tuple]
 
+            operand_for_counts = operand
             condition_obj = compare_fn(operand, threshold)
             if not hasattr(condition_obj, "where"):
                 raise AttributeError("Condition object has no where() method")
 
             v_true = operand if value_if_true is None else value_if_true
             result_obj = condition_obj.where(v_true, v_false)
-            condition_data = _materialize_backend_value(condition_obj)
             result_data = _materialize_backend_value(result_obj)
             if resolved.is_server():
                 execution_mode = "server_where"
@@ -710,6 +711,7 @@ def where_filter(
                 "falling back to generic array backend."
             )
             data_slice = resolved[slice_tuple]
+            operand_for_counts = data_slice
             condition_data = compare_fn(data_slice, threshold)
             v_true = data_slice if value_if_true is None else value_if_true
             if hasattr(condition_data, "where"):
@@ -751,13 +753,43 @@ def where_filter(
         # Compute summary statistics
         summary = _compute_summary(result_data)
         
-        # Count how many elements matched the condition
-        num_total = int(getattr(condition_data, "size", estimated_size))
-        if hasattr(condition_data, "sum"):
-            num_matched = int(_to_json_safe(condition_data.sum()))
-        else:
-            import numpy as np
-            num_matched = int(np.sum(condition_data))
+        # Count how many elements matched the condition.
+        # Avoid materializing boolean lazy conditions directly: this can segfault
+        # for some backend combinations (e.g. server slices + lazy bool eval).
+        import numpy as np
+        num_total = int(estimated_size)
+        num_matched = 0
+        try:
+            if operand_for_counts is None:
+                raise RuntimeError("No operand available for counting.")
+            if hasattr(operand_for_counts, "shape") and hasattr(operand_for_counts, "__getitem__"):
+                full_key = tuple(slice(None) for _ in getattr(operand_for_counts, "shape", ()))
+                operand_values = operand_for_counts[full_key]
+            else:
+                operand_values = operand_for_counts
+            condition_values = compare_fn(operand_values, threshold)
+            num_total = int(getattr(condition_values, "size", estimated_size))
+            num_matched = int(np.sum(condition_values))
+        except Exception as e:
+            logger.warning(
+                "Condition-count fallback for '%s' due to backend error: %s",
+                path,
+                e,
+            )
+            num_total = int(getattr(result_data, "size", estimated_size))
+            if (
+                value_if_true is not None
+                and value_if_false is not None
+                and value_if_true != value_if_false
+            ):
+                try:
+                    if hasattr(result_data, "shape") and hasattr(result_data, "__getitem__"):
+                        result_values = result_data[tuple(slice(None) for _ in getattr(result_data, "shape", ()))]
+                    else:
+                        result_values = np.asarray(result_data)
+                    num_matched = int(np.sum(result_values == value_if_true))
+                except Exception:
+                    num_matched = 0
         match_percentage = (num_matched / num_total * 100) if num_total > 0 else 0
         
         result = {

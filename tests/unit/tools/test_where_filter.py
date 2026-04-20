@@ -184,6 +184,60 @@ class _FakeUploadClient:
         return types.SimpleNamespace(path=path)
 
 
+class _CrashyCondition:
+    """Condition object that crashes if directly materialized."""
+
+    def __init__(self, mask: np.ndarray, source_values: np.ndarray):
+        self._mask = np.asarray(mask, dtype=bool)
+        self._source_values = np.asarray(source_values)
+        self.shape = self._mask.shape
+        self.size = self._mask.size
+
+    def where(self, value1=None, value2=None):
+        true_values = self._source_values if value1 is None else np.asarray(value1)
+        false_values = 0 if value2 is None else value2
+        return _FakeServerOperand(np.where(self._mask, true_values, false_values))
+
+    def compute(self):
+        raise RuntimeError("simulated condition materialization crash")
+
+    def __getitem__(self, _key):
+        raise RuntimeError("simulated condition slice crash")
+
+
+class _CrashyOperand:
+    """Operand that returns crashy conditions but supports safe slicing."""
+
+    def __init__(self, data: np.ndarray):
+        self._data = np.asarray(data)
+        self.shape = self._data.shape
+        self.dtype = self._data.dtype
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def __lt__(self, threshold):
+        return _CrashyCondition(self._data < threshold, self._data)
+
+
+class _CrashyWhereDataset:
+    """Server dataset whose condition lazy materialization is unsafe."""
+
+    def __init__(self):
+        self.shape = (100,)
+        self.dtype = "int64"
+        self._data = np.arange(100)
+
+    def slice(self, key, as_blosc2=True):
+        return _CrashyOperand(self._data[key])
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def __lt__(self, threshold):
+        return _CrashyCondition(self._data < threshold, self._data)
+
+
 def _make_resolved(fake_dataset):
     """Helper to create a ResolvedData wrapping a fake dataset."""
     return ResolvedData(fake_dataset, source='server', name='@test/data.b2nd')
@@ -364,6 +418,35 @@ def test_where_filter_auto_saves_server_result_to_personal_when_authenticated(mo
     assert result["auto_saved_to_personal"] is True
     assert result["result_path"] == "@personal/where_filter/auto_filtered.b2nd"
     assert fake_client.calls[0]["path"] == "@personal/where_filter/auto_filtered.b2nd"
+    assert fake_client.calls[0]["compute"] is True
+
+
+def test_where_filter_compute_false_keeps_lazy_upload_mode(monkeypatch) -> None:
+    # What this tests: callers can still opt out of eager materialization.
+    # Why important: preserves advanced chaining option for server-side lazy workflows.
+    fake_client = _FakeUploadClient()
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeServerWhereDataset()))
+    monkeypatch.setattr(
+        data_access,
+        "get_client_auth_status",
+        lambda: {"authenticated": True, "urlbase": "http://test", "username": "alice"},
+    )
+    monkeypatch.setattr(data_access, "_get_client", lambda: fake_client)
+    monkeypatch.setattr(
+        data_access,
+        "_build_default_where_save_path",
+        lambda _path: "@personal/where_filter/lazy_filtered.b2nd",
+    )
+
+    result = data_access.where_filter(
+        path="@public/example.b2nd",
+        operator=">",
+        threshold=95,
+        compute=False,
+    )
+
+    assert "error" not in result
+    assert result["compute_on_save"] is False
     assert fake_client.calls[0]["compute"] is False
 
 
@@ -408,6 +491,32 @@ def test_where_filter_auto_save_is_skipped_when_server_where_is_unavailable(monk
     assert result["execution_mode"] == "local_numpy"
     assert result["stored_server_side"] is False
     assert "Native server-side where execution was unavailable" in result["persistence_note"]
+
+
+def test_where_filter_avoids_condition_materialization_crashes(monkeypatch) -> None:
+    # What this tests: where_filter no longer materializes boolean condition objects directly.
+    # Why important: avoids backend segfault/crash path observed on server-sliced LazyExpr conditions.
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_CrashyWhereDataset()))
+    monkeypatch.setattr(
+        data_access,
+        "get_client_auth_status",
+        lambda: {"authenticated": False, "urlbase": "http://test", "username": None},
+    )
+
+    result = data_access.where_filter(
+        path="@public/example.b2nd",
+        operator="<",
+        threshold=5,
+        slices="0:10",
+        value_if_true=5,
+        value_if_false=100,
+    )
+
+    assert "error" not in result
+    assert result["match_summary"]["matched"] == 5
+    assert result["match_summary"]["total"] == 10
+    assert result["data"][:5] == [5, 5, 5, 5, 5]
+    assert result["data"][5:] == [100, 100, 100, 100, 100]
 
 
 # ---------------------------------------------------------------------------
