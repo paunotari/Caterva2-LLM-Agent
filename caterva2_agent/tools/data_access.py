@@ -18,7 +18,13 @@ import blosc2
 
 logger = logging.getLogger('caterva2_agent')
 
-from ._base import resolve_data, _to_json_safe, register_fetched_object
+from ._base import (
+    resolve_data,
+    _to_json_safe,
+    register_fetched_object,
+    _get_client,
+    get_client_auth_status,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +156,22 @@ DATA_ACCESS_TOOLS = [
                         "description": (
                             "Optional slice specification to limit the filter to a region. "
                             "Same syntax as get_slice. Highly recommended for large datasets."
+                        )
+                    },
+                    "save_path": {
+                        "type": "string",
+                        "description": (
+                            "Optional server path in '@personal/...' where the filtered result "
+                            "should be saved for chaining more server-side operations. "
+                            "Only supported for server datasets."
+                        )
+                    },
+                    "compute": {
+                        "type": "boolean",
+                        "description": (
+                            "Only used when save_path is provided. "
+                            "False (default): store lazy expression wrapper. "
+                            "True: compute and materialize result on server during upload."
                         )
                     }
                 },
@@ -553,7 +575,9 @@ def where_filter(
     threshold: float,
     value_if_true: float | None = None,
     value_if_false: float | None = None,
-    slices: str | None = None
+    slices: str | None = None,
+    save_path: str | None = None,
+    compute: bool = False,
 ) -> Dict[str, Any]:
     """
     Filter dataset or local variable values based on a condition.
@@ -579,6 +603,8 @@ def where_filter(
         value_if_true: Value where condition is True (default: original data)
         value_if_false: Value where condition is False (default: 0)
         slices: Optional slice to limit the region (recommended for large datasets)
+        save_path: Optional '@personal/...' path to persist result server-side
+        compute: When persisting, execute expression immediately on server if True
     
     Returns:
         Dict with filtered data, condition info, and summary, or 'error' on failure.
@@ -598,10 +624,43 @@ def where_filter(
     logger.debug(f"Values: if_true={value_if_true or 'data'}, if_false={value_if_false or 0}")
     if slices:
         logger.debug(f"Slice: {slices}")
+    if save_path:
+        logger.debug(f"Persist result to: {save_path} (compute={compute})")
     
     try:
         resolved = resolve_data(path)
         shape = resolved.shape
+
+        save_path_clean: str | None = None
+        if save_path is not None:
+            save_path_clean = save_path.strip()
+            if not save_path_clean:
+                return {"error": "'save_path' must be a non-empty string when provided."}
+            if resolved.is_local():
+                return {
+                    "error": (
+                        "save_path persistence is only supported when filtering a server dataset. "
+                        "For local variables, keep using the returned in-memory result."
+                    )
+                }
+            if not save_path_clean.startswith("@personal/"):
+                return {
+                    "error": (
+                        "save_path must target your writable personal root and start with "
+                        "'@personal/'."
+                    )
+                }
+            auth_status = get_client_auth_status()
+            if not auth_status.get("authenticated"):
+                return {
+                    "error": (
+                        "Authentication required to persist where_filter results server-side. "
+                        "Run notebook `login(...)` and verify with `auth_status()`."
+                    ),
+                    "authenticated": False,
+                    "save_path": save_path_clean,
+                    "server": auth_status.get("urlbase"),
+                }
         
         # Determine slice to apply.
         # If no slice is provided, run on full dataset by default.
@@ -634,6 +693,8 @@ def where_filter(
         compare_fn = COMPARISON_OPERATORS[operator]
         v_false = 0 if value_if_false is None else value_if_false
         execution_mode = "blosc2_where"
+        result_obj: Any | None = None
+        persisted_result_path: str | None = None
 
         try:
             operand = resolved.data
@@ -670,6 +731,40 @@ def where_filter(
                 import numpy as np
                 result_data = np.where(condition_data, v_true, v_false)
             execution_mode = "local_numpy"
+
+        if save_path_clean is not None:
+            if execution_mode != "server_where" or result_obj is None:
+                return {
+                    "error": (
+                        "Could not persist filtered result on server because native server-side "
+                        "where execution was unavailable for this dataset/path."
+                    ),
+                    "path": path,
+                    "save_path": save_path_clean,
+                    "execution_mode": execution_mode,
+                }
+
+            try:
+                client = _get_client()
+                if client is None:
+                    raise RuntimeError("Caterva2 client is not available.")
+                persisted = client.upload(result_obj, save_path_clean, compute=compute)
+                persisted_result_path = (
+                    getattr(persisted, "path", None)
+                    or getattr(persisted, "name", None)
+                    or save_path_clean
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to persist where_filter result to '%s': %s",
+                    save_path_clean,
+                    e,
+                )
+                return {
+                    "error": f"Failed to persist filtered result to '{save_path_clean}': {e}",
+                    "path": path,
+                    "save_path": save_path_clean,
+                }
         
         # Compute summary statistics
         summary = _compute_summary(result_data)
@@ -703,6 +798,16 @@ def where_filter(
             "summary": summary,
             "materialized_in_notebook": False
         }
+
+        if save_path_clean is not None:
+            result["stored_server_side"] = True
+            result["result_path"] = str(persisted_result_path)
+            result["compute_on_save"] = bool(compute)
+            result["server_change_applied"] = True
+            result["_next_step_hint"] = (
+                "Use result_path in follow-up server operations "
+                "(get_slice, collapse_dimensions, where_filter, visualize_dataset)."
+            )
 
         if estimated_nbytes is not None:
             result["estimated_size_mb"] = round(estimated_nbytes / (1024 * 1024), 2)

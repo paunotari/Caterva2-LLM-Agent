@@ -173,6 +173,17 @@ class _FakeServerWhereDataset:
         return _FakeServerOperand(self._data) != threshold
 
 
+class _FakeUploadClient:
+    """Client double for verifying server-side persistence uploads."""
+
+    def __init__(self):
+        self.calls: list[dict[str, object]] = []
+
+    def upload(self, obj, path: str, compute: bool = False):
+        self.calls.append({"obj": obj, "path": path, "compute": compute})
+        return types.SimpleNamespace(path=path)
+
+
 def _make_resolved(fake_dataset):
     """Helper to create a ResolvedData wrapping a fake dataset."""
     return ResolvedData(fake_dataset, source='server', name='@test/data.b2nd')
@@ -321,6 +332,97 @@ def test_where_filter_falls_back_to_local_numpy_when_server_where_unavailable(mo
     assert "error" not in result
     assert result["execution_mode"] == "local_numpy"
     assert result["match_summary"]["matched"] == 4
+
+
+def test_where_filter_can_persist_server_result_for_chaining(monkeypatch) -> None:
+    # What this tests: server where result can be saved to @personal for follow-up server ops.
+    # Why important: enables chained workflows without local materialization between steps.
+    fake_client = _FakeUploadClient()
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeServerWhereDataset()))
+    monkeypatch.setattr(
+        data_access,
+        "get_client_auth_status",
+        lambda: {"authenticated": True, "urlbase": "http://test", "username": "alice"},
+    )
+    monkeypatch.setattr(data_access, "_get_client", lambda: fake_client)
+
+    result = data_access.where_filter(
+        path="@public/example.b2nd",
+        operator=">",
+        threshold=95,
+        slices="0:100",
+        save_path="@personal/filtered_95.b2nd",
+    )
+
+    assert "error" not in result
+    assert result["execution_mode"] == "server_where"
+    assert result["stored_server_side"] is True
+    assert result["result_path"] == "@personal/filtered_95.b2nd"
+    assert fake_client.calls[0]["path"] == "@personal/filtered_95.b2nd"
+    assert fake_client.calls[0]["compute"] is False
+
+
+def test_where_filter_persist_requires_authentication(monkeypatch) -> None:
+    # What this tests: persistence requests are blocked when user is not authenticated.
+    # Why important: writing under @personal must require notebook login.
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeServerWhereDataset()))
+    monkeypatch.setattr(
+        data_access,
+        "get_client_auth_status",
+        lambda: {"authenticated": False, "urlbase": "http://test", "username": None},
+    )
+
+    result = data_access.where_filter(
+        path="@public/example.b2nd",
+        operator=">",
+        threshold=95,
+        save_path="@personal/filtered_95.b2nd",
+    )
+
+    assert "error" in result
+    assert "Authentication required" in result["error"]
+
+
+def test_where_filter_persist_requires_personal_root(monkeypatch) -> None:
+    # What this tests: persistence target must stay in @personal.
+    # Why important: tool should avoid writing to read-only/shared roots unexpectedly.
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeServerWhereDataset()))
+    monkeypatch.setattr(
+        data_access,
+        "get_client_auth_status",
+        lambda: {"authenticated": True, "urlbase": "http://test", "username": "alice"},
+    )
+
+    result = data_access.where_filter(
+        path="@public/example.b2nd",
+        operator=">",
+        threshold=95,
+        save_path="@public/filtered_95.b2nd",
+    )
+
+    assert "error" in result
+    assert "@personal/" in result["error"]
+
+
+def test_where_filter_persist_fails_when_server_where_is_unavailable(monkeypatch) -> None:
+    # What this tests: persistence requires native server where path.
+    # Why important: fallback local mode should not pretend to create server datasets.
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDataset1D()))
+    monkeypatch.setattr(
+        data_access,
+        "get_client_auth_status",
+        lambda: {"authenticated": True, "urlbase": "http://test", "username": "alice"},
+    )
+
+    result = data_access.where_filter(
+        path="@public/example.b2nd",
+        operator=">",
+        threshold=95,
+        save_path="@personal/filtered_95.b2nd",
+    )
+
+    assert "error" in result
+    assert "native server-side where execution was unavailable" in result["error"]
 
 
 # ---------------------------------------------------------------------------
