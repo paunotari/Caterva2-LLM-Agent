@@ -263,6 +263,27 @@ class _StrictUploadClient:
         return types.SimpleNamespace(path=path)
 
 
+class _PersistedStatsDataset:
+    """Persisted dataset stub with deterministic server-side stats."""
+
+    def __init__(self):
+        self.shape = (4,)
+        self.dtype = "float32"
+        self._data = np.array([123, 123, 123, 123], dtype=np.float32)
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def min(self):
+        return np.float32(123)
+
+    def max(self):
+        return np.float32(123)
+
+    def mean(self):
+        return np.float32(123)
+
+
 class _CrashyCondition:
     """Condition object that crashes if directly materialized."""
 
@@ -536,6 +557,50 @@ def test_where_filter_auto_save_uploads_materialized_values_when_compute_true(mo
 
     unique_values = set(np.asarray(uploaded_values).ravel().tolist())
     assert unique_values == {5, 20}
+
+
+def test_where_filter_uses_persisted_server_dataset_for_summary_when_auto_saved(monkeypatch) -> None:
+    # What this tests: summary metadata for auto-saved server where uses persisted dataset stats path.
+    # Why important: keeps post-filter stats aligned with server-side persisted artifact.
+    fake_client = _FakeUploadClient()
+    source_dataset = _FakeServerWhereDataset()
+    persisted_path = "@personal/where_filter/server_stats_filtered.b2nd"
+
+    def _resolve(path: str):
+        if path == "@public/example.b2nd":
+            return _make_resolved(source_dataset)
+        if path == persisted_path:
+            return ResolvedData(_PersistedStatsDataset(), source="server", name=persisted_path)
+        raise AssertionError(f"Unexpected resolve_data path: {path}")
+
+    monkeypatch.setattr(data_access, "resolve_data", _resolve)
+    monkeypatch.setattr(
+        data_access,
+        "get_client_auth_status",
+        lambda: {"authenticated": True, "urlbase": "http://test", "username": "alice"},
+    )
+    monkeypatch.setattr(data_access, "_get_client", lambda: fake_client)
+    monkeypatch.setattr(
+        data_access,
+        "_build_default_where_save_path",
+        lambda _path: persisted_path,
+    )
+
+    result = data_access.where_filter(
+        path="@public/example.b2nd",
+        operator=">",
+        threshold=95,
+        compute=True,
+    )
+
+    assert "error" not in result
+    assert result["stored_server_side"] is True
+    assert result["result_path"] == persisted_path
+    assert result["summary"]["mean"] == 123.0
+    assert result["summary"]["min"] == 123.0
+    assert result["summary"]["max"] == 123.0
+    assert result["result_shape"] == [4]
+    assert result["dtype"] == "float32"
 
 
 def test_where_filter_compute_false_keeps_lazy_upload_mode(monkeypatch) -> None:

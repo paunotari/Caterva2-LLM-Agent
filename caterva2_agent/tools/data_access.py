@@ -88,6 +88,22 @@ DATA_ACCESS_TOOLS = [
                             "For 3D+: '0, :, 0:10' etc. Separate dimensions with commas. "
                             "Defaults to first elements up to the limit if not specified."
                         )
+                    },
+                    "persist_result": {
+                        "type": "boolean",
+                        "description": (
+                            "Optional (server datasets only). "
+                            "When true and authenticated, saves the sliced result as a new "
+                            "@personal dataset for follow-up server operations."
+                        )
+                    },
+                    "save_path": {
+                        "type": "string",
+                        "description": (
+                            "Optional destination path for persistence when persist_result=true. "
+                            "Must start with '@personal/'. If omitted, auto-generates a path under "
+                            "'@personal/slices/'."
+                        )
                     }
                 },
                 "required": ["path"]
@@ -444,7 +460,12 @@ def _materialize_backend_value(value: Any) -> Any:
 # TOOL IMPLEMENTATIONS
 # ---------------------------------------------------------------------------
 
-def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
+def get_slice(
+    path: str,
+    slices: str | None = None,
+    persist_result: bool = False,
+    save_path: str | None = None,
+) -> Dict[str, Any]:
     """
     Retrieve a slice of data from a dataset or local variable.
     
@@ -459,6 +480,9 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
         path: Server dataset path (e.g. '@public/examples/ds-1d.b2nd')
               OR local variable name (e.g. 'my_data')
         slices: Python slice syntax (e.g. '0:100', '0:5, 0:3')
+        persist_result: When true for authenticated server paths, store slice
+            result in @personal for follow-up operations.
+        save_path: Optional explicit @personal destination for persistence.
     
     Returns:
         Dict with slice metadata, summary, and data values, or 'error' on failure.
@@ -503,6 +527,61 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
         
         # Fetch the data
         data = resolved[slice_tuple]
+        persisted_result_path: str | None = None
+        persistence_note: str | None = None
+
+        if persist_result:
+            if resolved.is_local():
+                persistence_note = (
+                    "Persistence skipped: local variable slices are not uploaded automatically."
+                )
+            else:
+                auth_status = get_client_auth_status()
+                if not auth_status.get("authenticated"):
+                    persistence_note = (
+                        "Persistence skipped: session is not authenticated. "
+                        "Use notebook login(...) to enable @personal persistence."
+                    )
+                else:
+                    target_path = save_path.strip() if isinstance(save_path, str) else ""
+                    if not target_path:
+                        source_name = path.rsplit("/", 1)[-1] if "/" in path else path
+                        stem = source_name.removesuffix(".b2nd").removesuffix(".b2frame")
+                        sanitized = "".join(
+                            ch if ch.isalnum() or ch in ("-", "_") else "_"
+                            for ch in stem
+                        ) or "slice"
+                        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+                        target_path = f"@personal/slices/{sanitized}_{timestamp}.b2nd"
+
+                    if not target_path.startswith("@personal/"):
+                        return {
+                            "error": "save_path must start with '@personal/' for get_slice persistence.",
+                            "save_path": target_path,
+                        }
+
+                    try:
+                        payload_to_upload = data
+                        if (
+                            not isinstance(payload_to_upload, blosc2.NDArray)
+                            and hasattr(payload_to_upload, "shape")
+                        ):
+                            try:
+                                payload_to_upload = blosc2.asarray(payload_to_upload)
+                            except Exception:
+                                pass
+
+                        client = _get_client()
+                        if client is None:
+                            raise RuntimeError("Caterva2 client is not available.")
+                        persisted = client.upload(payload_to_upload, target_path)
+                        persisted_result_path = (
+                            getattr(persisted, "path", None)
+                            or getattr(persisted, "name", None)
+                            or target_path
+                        )
+                    except Exception as e:
+                        persistence_note = f"Failed to persist sliced result to '@personal': {e}"
         
         # Pre-compute summary for LLM presentation
         summary = _compute_summary(data)
@@ -518,6 +597,21 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
             "summary": summary,
             "materialized_in_notebook": False
         }
+
+        if persist_result:
+            result["stored_server_side"] = persisted_result_path is not None
+            if persisted_result_path is not None:
+                result["result_path"] = str(persisted_result_path)
+                result["save_path"] = str(persisted_result_path)
+                result["server_change_applied"] = True
+                result["_next_step_hint"] = (
+                    "Use result_path in follow-up server operations "
+                    "(get_slice, where_filter, collapse_dimensions, visualize_dataset)."
+                )
+            else:
+                result["server_change_applied"] = False
+                if persistence_note:
+                    result["persistence_note"] = persistence_note
 
         if estimated_nbytes is not None:
             result["estimated_size_mb"] = round(estimated_nbytes / (1024 * 1024), 2)
@@ -776,8 +870,25 @@ def where_filter(
                     "result was not auto-saved to @personal."
                 )
         
+        result_dtype = str(getattr(result_data, "dtype", resolved.dtype))
+        result_shape = list(getattr(result_data, "shape", ()))
+        summary_source = result_data
+
+        if execution_mode == "server_where" and persisted_result_path is not None and compute:
+            try:
+                persisted_resolved = resolve_data(str(persisted_result_path))
+                summary_source = persisted_resolved.data
+                result_dtype = str(persisted_resolved.dtype)
+                result_shape = list(persisted_resolved.shape)
+            except Exception as e:
+                logger.warning(
+                    "Failed to compute where_filter summary from persisted dataset '%s': %s",
+                    persisted_result_path,
+                    e,
+                )
+
         # Compute summary statistics
-        summary = _compute_summary(result_data)
+        summary = _compute_summary(summary_source)
         
         # Count how many elements matched the condition.
         # Avoid materializing boolean lazy conditions directly: this can segfault
@@ -822,10 +933,10 @@ def where_filter(
             "path": path,
             "source": source_type,
             "dataset_shape": list(shape),
-            "dtype": str(resolved.dtype),
+            "dtype": result_dtype,
             "condition": f"data {operator} {threshold}",
             "slice_applied": slice_str_used,
-            "result_shape": list(getattr(result_data, "shape", ())),
+            "result_shape": result_shape,
             "estimated_elements": int(estimated_size),
             "value_if_true": "original_data" if value_if_true is None else value_if_true,
             "value_if_false": v_false,

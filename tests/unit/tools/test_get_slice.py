@@ -88,6 +88,17 @@ class _FakeDatasetLarge:
         return self._data[key]
 
 
+class _FakeUploadClient:
+    """Client double for verifying get_slice persistence uploads."""
+
+    def __init__(self):
+        self.calls: list[dict[str, object]] = []
+
+    def upload(self, obj, path: str, **kwargs):
+        self.calls.append({"obj": obj, "path": path, "kwargs": kwargs})
+        return types.SimpleNamespace(path=path)
+
+
 def _make_resolved(fake_dataset):
     """Helper to create a ResolvedData wrapping a fake dataset."""
     return ResolvedData(fake_dataset, source='server', name='@test/data.b2nd')
@@ -224,3 +235,47 @@ def test_get_slice_does_not_auto_register_server_data(monkeypatch) -> None:
 
     assert "error" not in result
     assert get_fetched_objects() == {}
+
+
+def test_get_slice_persist_result_saves_server_slice_when_authenticated(monkeypatch) -> None:
+    # What this tests: opt-in persistence stores server slice result in @personal.
+    # Why important: enables chaining on persisted slices without making reads stateful by default.
+    fake_client = _FakeUploadClient()
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDataset1D()))
+    monkeypatch.setattr(
+        data_access,
+        "get_client_auth_status",
+        lambda: {"authenticated": True, "urlbase": "http://test", "username": "alice"},
+    )
+    monkeypatch.setattr(data_access, "_get_client", lambda: fake_client)
+
+    result = data_access.get_slice(
+        "@public/example.b2nd",
+        slices="0:10",
+        persist_result=True,
+    )
+
+    assert "error" not in result
+    assert result["stored_server_side"] is True
+    assert result["result_path"].startswith("@personal/slices/")
+    assert fake_client.calls[0]["path"] == result["result_path"]
+
+
+def test_get_slice_persist_result_skips_when_not_authenticated(monkeypatch) -> None:
+    # What this tests: opt-in persistence reports auth requirement but still returns slice data.
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDataset1D()))
+    monkeypatch.setattr(
+        data_access,
+        "get_client_auth_status",
+        lambda: {"authenticated": False, "urlbase": "http://test", "username": None},
+    )
+
+    result = data_access.get_slice(
+        "@public/example.b2nd",
+        slices="0:10",
+        persist_result=True,
+    )
+
+    assert "error" not in result
+    assert result["stored_server_side"] is False
+    assert "not authenticated" in result["persistence_note"]
