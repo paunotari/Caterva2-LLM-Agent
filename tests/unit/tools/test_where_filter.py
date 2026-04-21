@@ -173,14 +173,93 @@ class _FakeServerWhereDataset:
         return _FakeServerOperand(self._data) != threshold
 
 
+class _LazyMaskWhereExpr:
+    """Lazy where expression that materializes to values but exposes bool mask shape/dtype."""
+
+    def __init__(self, mask: np.ndarray, source_values: np.ndarray, true_value, false_value):
+        self._mask = np.asarray(mask, dtype=bool)
+        self._source_values = np.asarray(source_values)
+        self._true_value = true_value
+        self._false_value = false_value
+        self.shape = self._mask.shape
+        self.dtype = np.dtype(bool)
+
+    def compute(self):
+        true_values = self._source_values if self._true_value is None else self._true_value
+        false_values = 0 if self._false_value is None else self._false_value
+        return np.where(self._mask, true_values, false_values)
+
+    def __getitem__(self, key):
+        return self._mask[key]
+
+
+class _BuggyPersistCondition:
+    """Condition object whose lazy where payload appears boolean until computed."""
+
+    def __init__(self, mask: np.ndarray, source_values: np.ndarray):
+        self._mask = np.asarray(mask, dtype=bool)
+        self._source_values = np.asarray(source_values)
+
+    def where(self, value1=None, value2=None):
+        return _LazyMaskWhereExpr(self._mask, self._source_values, value1, value2)
+
+
+class _BuggyPersistOperand:
+    """Operand returning lazy where expressions that can be mis-uploaded as bool."""
+
+    def __init__(self, data: np.ndarray):
+        self._data = np.asarray(data)
+        self.shape = self._data.shape
+        self.dtype = self._data.dtype
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def __lt__(self, threshold):
+        return _BuggyPersistCondition(self._data < threshold, self._data)
+
+
+class _BuggyPersistWhereDataset:
+    """Server dataset whose lazy where object must be materialized before upload."""
+
+    def __init__(self):
+        self.shape = (10,)
+        self.dtype = "int64"
+        self._data = np.arange(10)
+
+    def slice(self, key, as_blosc2=True):
+        return _BuggyPersistOperand(self._data[key])
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def __lt__(self, threshold):
+        return _BuggyPersistCondition(self._data < threshold, self._data)
+
+
 class _FakeUploadClient:
     """Client double for verifying server-side persistence uploads."""
 
     def __init__(self):
         self.calls: list[dict[str, object]] = []
 
-    def upload(self, obj, path: str, compute: bool = False):
-        self.calls.append({"obj": obj, "path": path, "compute": compute})
+    def upload(self, obj, path: str, **kwargs):
+        call = {"obj": obj, "path": path}
+        call.update(kwargs)
+        self.calls.append(call)
+        return types.SimpleNamespace(path=path)
+
+
+class _StrictUploadClient:
+    """Upload client that rejects compute kwarg for non-lazy payloads."""
+
+    def __init__(self):
+        self.calls: list[dict[str, object]] = []
+
+    def upload(self, obj, path: str, **kwargs):
+        if "compute" in kwargs and not hasattr(obj, "compute"):
+            raise RuntimeError("compute argument cannot be specified for non-LazyArray objects.")
+        self.calls.append({"obj": obj, "path": path, "kwargs": kwargs})
         return types.SimpleNamespace(path=path)
 
 
@@ -418,14 +497,52 @@ def test_where_filter_auto_saves_server_result_to_personal_when_authenticated(mo
     assert result["auto_saved_to_personal"] is True
     assert result["result_path"] == "@personal/where_filter/auto_filtered.b2nd"
     assert fake_client.calls[0]["path"] == "@personal/where_filter/auto_filtered.b2nd"
-    assert fake_client.calls[0]["compute"] is True
+    assert "compute" not in fake_client.calls[0]
+
+
+def test_where_filter_auto_save_uploads_materialized_values_when_compute_true(monkeypatch) -> None:
+    # What this tests: eager server auto-save uploads computed replacement values, not lazy bool masks.
+    # Why important: avoids persisting boolean datasets when caller requested numeric replacements.
+    fake_client = _StrictUploadClient()
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_BuggyPersistWhereDataset()))
+    monkeypatch.setattr(
+        data_access,
+        "get_client_auth_status",
+        lambda: {"authenticated": True, "urlbase": "http://test", "username": "alice"},
+    )
+    monkeypatch.setattr(data_access, "_get_client", lambda: fake_client)
+    monkeypatch.setattr(
+        data_access,
+        "_build_default_where_save_path",
+        lambda _path: "@personal/where_filter/materialized_filtered.b2nd",
+    )
+
+    result = data_access.where_filter(
+        path="@public/example.b2nd",
+        operator="<",
+        threshold=5,
+        value_if_true=5,
+        value_if_false=20,
+        compute=True,
+    )
+
+    assert "error" not in result
+    uploaded = fake_client.calls[0]["obj"]
+    assert "compute" not in fake_client.calls[0]["kwargs"]
+    if hasattr(uploaded, "shape") and hasattr(uploaded, "__getitem__"):
+        uploaded_values = uploaded[tuple(slice(None) for _ in uploaded.shape)]
+    else:
+        uploaded_values = np.asarray(uploaded)
+
+    unique_values = set(np.asarray(uploaded_values).ravel().tolist())
+    assert unique_values == {5, 20}
 
 
 def test_where_filter_compute_false_keeps_lazy_upload_mode(monkeypatch) -> None:
     # What this tests: callers can still opt out of eager materialization.
     # Why important: preserves advanced chaining option for server-side lazy workflows.
     fake_client = _FakeUploadClient()
-    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeServerWhereDataset()))
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_BuggyPersistWhereDataset()))
     monkeypatch.setattr(
         data_access,
         "get_client_auth_status",
@@ -440,8 +557,8 @@ def test_where_filter_compute_false_keeps_lazy_upload_mode(monkeypatch) -> None:
 
     result = data_access.where_filter(
         path="@public/example.b2nd",
-        operator=">",
-        threshold=95,
+        operator="<",
+        threshold=5,
         compute=False,
     )
 

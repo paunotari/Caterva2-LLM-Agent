@@ -727,7 +727,33 @@ def where_filter(
                     client = _get_client()
                     if client is None:
                         raise RuntimeError("Caterva2 client is not available.")
-                    persisted = client.upload(result_obj, save_path_clean, compute=compute)
+                    # When eager mode is requested, persist the already materialized
+                    # filtered values to avoid saving backend lazy bool masks.
+                    payload_to_upload = result_obj
+                    if compute:
+                        payload_to_upload = result_data
+                        if (
+                            hasattr(payload_to_upload, "compute")
+                            and not isinstance(payload_to_upload, blosc2.NDArray)
+                        ):
+                            payload_to_upload = payload_to_upload.compute()
+                        if (
+                            not isinstance(payload_to_upload, blosc2.NDArray)
+                            and hasattr(payload_to_upload, "shape")
+                        ):
+                            try:
+                                payload_to_upload = blosc2.asarray(payload_to_upload)
+                            except Exception:
+                                # Keep backend-provided representation if conversion fails.
+                                pass
+
+                    if (
+                        hasattr(payload_to_upload, "compute")
+                        and not isinstance(payload_to_upload, blosc2.NDArray)
+                    ):
+                        persisted = client.upload(payload_to_upload, save_path_clean, compute=compute)
+                    else:
+                        persisted = client.upload(payload_to_upload, save_path_clean)
                     persisted_result_path = (
                         getattr(persisted, "path", None)
                         or getattr(persisted, "name", None)
