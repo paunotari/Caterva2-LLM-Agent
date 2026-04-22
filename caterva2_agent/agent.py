@@ -49,6 +49,109 @@ if not any(
 
 logger.propagate = False
 
+MAX_TOOL_RESULT_TEXT_CHARS = 4000
+SENSITIVE_TOOL_FIELD_NAMES = {"image", "image_base64", "binary_blob"}
+SENSITIVE_TOOL_FIELD_HINTS = ("base64", "data_uri", "binary")
+
+
+def _is_sensitive_tool_field(field_name: str, value: Any) -> bool:
+    """Detect payload fields that should not be sent back into the LLM context."""
+    key = field_name.lower()
+    if key in SENSITIVE_TOOL_FIELD_NAMES:
+        return True
+    if any(hint in key for hint in SENSITIVE_TOOL_FIELD_HINTS):
+        return True
+    return key == "image" and isinstance(value, str) and value.startswith("data:image/")
+
+
+def _sanitize_tool_payload_for_llm(
+    payload: Any,
+    *,
+    path: str = "",
+    redactions: list[dict[str, Any]] | None = None,
+) -> Any:
+    """Strip oversized/binary fields from tool payloads before storing in chat history."""
+    redactions = redactions if redactions is not None else []
+
+    if isinstance(payload, dict):
+        sanitized: dict[str, Any] = {}
+        for key, value in payload.items():
+            field_path = f"{path}.{key}" if path else key
+            if _is_sensitive_tool_field(key, value) and isinstance(value, str):
+                redactions.append(
+                    {
+                        "field": field_path,
+                        "reason": "binary_or_data_uri",
+                        "chars": len(value),
+                    }
+                )
+                if key == "image":
+                    sanitized["image_available_in_notebook"] = True
+                sanitized[key] = "[omitted from LLM context]"
+                continue
+
+            sanitized[key] = _sanitize_tool_payload_for_llm(
+                value,
+                path=field_path,
+                redactions=redactions,
+            )
+        return sanitized
+
+    if isinstance(payload, list):
+        return [
+            _sanitize_tool_payload_for_llm(
+                item,
+                path=f"{path}[{index}]",
+                redactions=redactions,
+            )
+            for index, item in enumerate(payload)
+        ]
+
+    if isinstance(payload, str) and len(payload) > MAX_TOOL_RESULT_TEXT_CHARS:
+        redactions.append(
+            {
+                "field": path or "<string>",
+                "reason": "oversized_text",
+                "chars": len(payload),
+            }
+        )
+        overflow = len(payload) - MAX_TOOL_RESULT_TEXT_CHARS
+        return (
+            f"{payload[:MAX_TOOL_RESULT_TEXT_CHARS]}"
+            f"... [truncated {overflow} chars for LLM context]"
+        )
+
+    return payload
+
+
+def _sanitize_tool_result_for_llm(tool_name: str, tool_result: str) -> tuple[str, Any | None]:
+    """
+    Prepare tool output for LLM history while preserving the raw parsed result.
+
+    Returns:
+        (sanitized_json_for_llm, parsed_raw_payload_or_none)
+    """
+    try:
+        parsed = json.loads(tool_result)
+    except json.JSONDecodeError:
+        return tool_result, None
+
+    redactions: list[dict[str, Any]] = []
+    sanitized = _sanitize_tool_payload_for_llm(parsed, redactions=redactions)
+
+    if redactions and isinstance(sanitized, dict):
+        sanitized["_llm_sanitization"] = {
+            "tool": tool_name,
+            "redacted_fields": redactions,
+        }
+        logger.debug(
+            "Sanitized tool payload for LLM context: %s",
+            json.dumps({"tool": tool_name, "redactions": redactions}),
+        )
+
+    return json.dumps(sanitized), parsed
+
+
 def _run_tool(tool_call) -> tuple:
     """
     Execute a single tool call and return (tool_call_id, tool_name, tool_result).
@@ -97,6 +200,8 @@ class Agent:
         # Context window management: keep only the last N messages plus system prompt
         # This is a simple heuristic; more sophisticated approaches if needed (e.g., summarization, etc.).
         self.max_history_messages = 20  # Tune as needed
+        # Raw tool outputs from the latest run; used by notebook integration for rich artifacts.
+        self.last_tool_results: list[dict[str, Any]] = []
 
     @staticmethod
     def _call_llm_with_retry(**kwargs) -> Any | None:
@@ -145,6 +250,7 @@ class Agent:
 
         # Add the user's message to conversation history
         self.messages.append({"role": "user", "content": user_input})
+        self.last_tool_results = []
 
         iteration = 0
         logger.info(f"===== New Agent Run | User: {user_input} =====")
@@ -212,11 +318,21 @@ class Agent:
             # Order matters: the API expects results in the same sequence as the requests
             for future in futures:
                 tool_call_id, tool_name, tool_result = future.result()
+                sanitized_result, parsed_result = _sanitize_tool_result_for_llm(
+                    tool_name, tool_result
+                )
+                self.last_tool_results.append(
+                    {
+                        "tool_call_id": tool_call_id,
+                        "name": tool_name,
+                        "content": parsed_result,
+                    }
+                )
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
                     "name": tool_name,
-                    "content": tool_result
+                    "content": sanitized_result
                 })
 
             # Loop back: LLM will see the tool results and decide the next step
@@ -228,4 +344,5 @@ class Agent:
         """Clear conversation history (keeping only the system prompt) and reset token counter."""
         self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         self.total_tokens_used = 0
+        self.last_tool_results = []
         logger.info("Conversation and token counter reset")
