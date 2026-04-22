@@ -878,3 +878,30 @@ def test_where_filter_local_numpy_input_uses_blosc2_path() -> None:
     assert "error" not in result
     assert result["execution_mode"] == "blosc2_where"
     assert result["match_summary"]["matched"] == 4
+
+
+def test_where_filter_local_result_auto_injected_into_notebook() -> None:
+    # What this tests: small local where_filter results are auto-injected into notebook namespace.
+    # Why important: users don't lose filtered data after agent turn completes.
+    local_np = np.arange(10, dtype=np.int64)
+    namespace = {"local_np": local_np}
+    set_notebook_namespace(namespace)
+    clear_fetched_objects()
+
+    result = data_access.where_filter(
+        path="local_np",
+        operator=">",
+        threshold=5,
+        slices="0:10"
+    )
+
+    assert "error" not in result
+    assert result["execution_mode"] == "blosc2_where"
+    assert result["match_summary"]["matched"] == 4
+    assert "injected_as_variable" in result
+    injected_var = result["injected_as_variable"]
+    assert injected_var in namespace
+    assert np.array_equal(namespace[injected_var], result["data"])
+    
+    fetched = get_fetched_objects()
+    assert injected_var in fetched

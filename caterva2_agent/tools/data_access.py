@@ -25,6 +25,8 @@ from ._base import (
     register_fetched_object,
     _get_client,
     get_client_auth_status,
+    get_notebook_namespace,
+    ResolvedData,
 )
 
 
@@ -981,8 +983,36 @@ def where_filter(
         if warning:
             result["warning"] = warning
 
+        # Auto-inject local results into notebook namespace (no size limit for local).
+        # User already has the dataset locally; we assume they can handle the size.
+        injected_var_name: str | None = None
+        if is_local:
+            try:
+                namespace = get_notebook_namespace()
+                if namespace is not None:
+                    # Generate a unique variable name for the filtered result
+                    base_name = path.replace("_", "").replace("-", "").replace(".", "_")
+                    base_name = f"filtered_{base_name}"
+                    counter = 1
+                    var_name = base_name
+                    while var_name in namespace:
+                        var_name = f"{base_name}_{counter}"
+                        counter += 1
+                    
+                    # Inject into notebook namespace
+                    namespace[var_name] = result_data
+                    injected_var_name = var_name
+                    register_fetched_object(var_name, result_data)
+                    logger.info(f"Auto-injected local where_filter result as '{var_name}'")
+            except Exception as e:
+                logger.debug(f"Could not auto-inject local where_filter result: {e}")
+
         if summary["num_elements"] <= LLM_INLINE_DATA_MAX_ELEMENTS:
             result["data"] = _to_json_safe(result_data)
+        
+        # Add injected variable name if applicable
+        if injected_var_name is not None:
+            result["injected_as_variable"] = injected_var_name
         
         # Hint for LLM on how to present results
         if summary["num_elements"] > LLM_INLINE_DATA_MAX_ELEMENTS:
