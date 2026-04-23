@@ -279,3 +279,59 @@ def test_get_slice_persist_result_skips_when_not_authenticated(monkeypatch) -> N
     assert "error" not in result
     assert result["stored_server_side"] is False
     assert "not authenticated" in result["persistence_note"]
+
+
+def test_get_slice_local_variable_auto_injected_into_notebook(monkeypatch) -> None:
+    # What this tests: get_slice on local variables auto-registers result in notebook namespace.
+    # Why important: enables chaining on local data (slice → filter → analyze).
+    from caterva2_agent.tools._base import set_notebook_namespace, clear_fetched_objects, get_fetched_objects
+    
+    namespace = {"my_data": np.arange(100)}
+    set_notebook_namespace(namespace)
+    clear_fetched_objects()
+    
+    result = data_access.get_slice("my_data", slices="0:10")
+    
+    assert "error" not in result
+    assert "injected_as_variable" in result
+    injected_name = result["injected_as_variable"]
+    assert injected_name.startswith("sliced_mydata")
+    
+    # Verify the result is registered in the namespace
+    fetched = get_fetched_objects()
+    assert injected_name in fetched
+    assert len(fetched[injected_name]) == 10  # First 10 elements
+    
+    # Cleanup
+    set_notebook_namespace(None)
+    clear_fetched_objects()
+
+
+def test_get_slice_local_variable_chaining_support(monkeypatch) -> None:
+    # What this tests: result of get_slice on local data can be used by where_filter.
+    # Why important: demonstrates full chaining workflow for local operations.
+    from caterva2_agent.tools._base import set_notebook_namespace, clear_fetched_objects
+    
+    namespace = {"my_data": np.arange(100)}
+    set_notebook_namespace(namespace)
+    clear_fetched_objects()
+    
+    # First operation: slice
+    result1 = data_access.get_slice("my_data", slices="0:50")
+    assert "error" not in result1
+    assert "injected_as_variable" in result1
+    sliced_var_name = result1["injected_as_variable"]
+    
+    # Second operation: use the sliced result as input to where_filter
+    result2 = data_access.where_filter(
+        sliced_var_name,
+        operator=">",
+        threshold=25
+    )
+    
+    assert "error" not in result2
+    assert result2["match_summary"]["matched"] > 0
+    
+    # Cleanup
+    set_notebook_namespace(None)
+    clear_fetched_objects()

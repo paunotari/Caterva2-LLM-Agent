@@ -68,6 +68,8 @@ DATA_ACCESS_TOOLS = [
                     "Use this when the user wants to see actual data, not just statistics. "
                     "For large slices, returns metadata + summary by default instead of full values. "
                     "To materialize data into the notebook namespace, use load_dataset explicitly. "
+                    "For local variables, automatically registers the slice result in the notebook "
+                    "namespace for use in follow-up operations. "
                     "Works with both server datasets (@path) and local variables (variable_name)."
                 ),
             "parameters": {
@@ -529,6 +531,21 @@ def get_slice(
         
         # Fetch the data
         data = resolved[slice_tuple]
+        
+        # For blosc2-first architecture: normalize to blosc2 if needed
+        # (Server datasets return numpy via resolved[...], local blosc2 stay blosc2)
+        if not isinstance(data, blosc2.NDArray) and hasattr(data, "shape"):
+            try:
+                logger.debug(f"Normalizing fetched data to blosc2, original type: {type(data)}")
+                data = blosc2.asarray(data)
+            except Exception as e:
+                # Keep original if conversion fails
+                logger.debug(f"Could not normalize to blosc2: {e}, keeping as {type(data)}")
+                pass
+        
+        persisted_result_path: str | None = None
+        persistence_note: str | None = None
+        
         persisted_result_path: str | None = None
         persistence_note: str | None = None
 
@@ -615,6 +632,29 @@ def get_slice(
                 if persistence_note:
                     result["persistence_note"] = persistence_note
 
+        # Auto-inject local results into notebook namespace for chaining
+        injected_var_name: str | None = None
+        if is_local:
+            try:
+                namespace = get_notebook_namespace()
+                if namespace is not None:
+                    # Generate a unique variable name for the sliced result
+                    base_name = path.replace("_", "").replace("-", "").replace(".", "_")
+                    base_name = f"sliced_{base_name}"
+                    counter = 1
+                    var_name = base_name
+                    while var_name in namespace:
+                        var_name = f"{base_name}_{counter}"
+                        counter += 1
+                    
+                    # Inject into notebook namespace
+                    namespace[var_name] = data
+                    injected_var_name = var_name
+                    register_fetched_object(var_name, data)
+                    logger.info(f"Auto-injected local get_slice result as '{var_name}'")
+            except Exception as e:
+                logger.debug(f"Could not auto-inject local get_slice result: {e}")
+
         if estimated_nbytes is not None:
             result["estimated_size_mb"] = round(estimated_nbytes / (1024 * 1024), 2)
 
@@ -633,6 +673,10 @@ def get_slice(
                 "Full data omitted from tool output due to context-size policy. "
                 "Operation was executed, but only metadata and summary are returned."
             )
+        
+        # Add injected variable name if applicable
+        if injected_var_name is not None:
+            result["injected_as_variable"] = injected_var_name
         
         return result
     
@@ -785,8 +829,10 @@ def where_filter(
             if slices is not None:
                 if hasattr(operand, "slice"):
                     if resolved.is_server():
+                        # Server datasets: use as_blosc2=True to materialize to blosc2
                         operand = operand.slice(slice_tuple, as_blosc2=True)
                     else:
+                        # Local blosc2 arrays: use standard slice (blosc2 .slice() doesn't take as_blosc2)
                         operand = operand.slice(slice_tuple)
                 else:
                     operand = operand[slice_tuple]
