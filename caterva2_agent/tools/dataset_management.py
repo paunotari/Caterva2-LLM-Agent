@@ -6,6 +6,7 @@ Tools in this module:
 - download_dataset: Get a direct download URL
 - move_dataset: Move a dataset/file to another server path
 - remove_dataset: Remove a dataset/file from the server
+- upload_dataset: Upload local data (variable or array) to server
 """
 
 from __future__ import annotations
@@ -13,7 +14,9 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
-from ._base import _get_dataset, get_client_auth_status
+import blosc2
+
+from ._base import _get_dataset, _get_client, get_client_auth_status, resolve_data
 
 logger = logging.getLogger("caterva2_agent")
 
@@ -138,6 +141,46 @@ DATASET_MANAGEMENT_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "upload_dataset",
+            "description": (
+                "Upload a local dataset (from notebook variable or array) to the Caterva2 server. "
+                "The data is normalized to blosc2.NDArray format. "
+                "This is a write operation requiring authentication (use notebook login first). "
+                "Destination must be in @personal/ for user-scoped storage."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source": {
+                        "type": "string",
+                        "description": (
+                            "Source data reference: either a notebook variable name (e.g. 'my_data') "
+                            "or a local variable with {variable_name} syntax. "
+                            "The variable must be array-like (NumPy, blosc2 NDArray, etc.)."
+                        ),
+                    },
+                    "destination": {
+                        "type": "string",
+                        "description": (
+                            "Destination server path (must start with '@personal/'). "
+                            "Example: '@personal/my_dataset.b2nd'"
+                        ),
+                    },
+                    "overwrite": {
+                        "type": "boolean",
+                        "description": (
+                            "When false (default), fail if destination exists. "
+                            "When true, overwrite the destination."
+                        ),
+                    },
+                },
+                "required": ["source", "destination"],
+            },
+        },
+    },
 ]
 
 
@@ -153,6 +196,19 @@ def _ensure_server_path(path: str, field_name: str = "path") -> str | None:
         return (
             f"'{field_name}' must be a server path starting with '@'. "
             "Local variables are not supported by this tool."
+        )
+    return None
+
+
+def _ensure_personal_path(path: str, field_name: str = "destination") -> str | None:
+    """Validate that a path targets @personal/ (user-scoped storage)."""
+    error = _ensure_server_path(path, field_name)
+    if error:
+        return error
+    if not path.startswith("@personal/"):
+        return (
+            f"'{field_name}' must start with '@personal/' for user-scoped uploads. "
+            f"Got: {path}"
         )
     return None
 
@@ -351,3 +407,91 @@ def remove_dataset(path: str, dry_run: bool = True, confirm: bool = False) -> Di
     except Exception as e:
         logger.error("Failed to remove '%s': %s", path, e)
         return _error_with_auth_hint("remove dataset", e)
+
+
+def upload_dataset(source: str, destination: str, overwrite: bool = False) -> Dict[str, Any]:
+    """
+    Upload local data (variable or array) to the Caterva2 server.
+    
+    Resolves the source (notebook variable or reference), normalizes to blosc2.NDArray,
+    validates the destination path (@personal/ required), and uploads via client.upload().
+    
+    Args:
+        source: Variable name or reference (e.g. 'my_data' or from {variable} syntax)
+        destination: Server path (must start with '@personal/')
+        overwrite: Allow overwriting existing destination (default: False)
+    
+    Returns:
+        Dict with status, metadata, or error information
+    """
+    # Validate destination path
+    dest_error = _ensure_personal_path(destination, "destination")
+    if dest_error:
+        return {"error": dest_error}
+    
+    # Check authentication
+    auth_error = _requires_auth_for_write("upload datasets")
+    if auth_error:
+        return auth_error
+    
+    logger.info("Uploading data from '%s' to '%s'", source, destination)
+    
+    try:
+        # Resolve the source data (handles both local variables and server paths)
+        resolved = resolve_data(source)
+        data = resolved.data
+        
+        # Ensure data is blosc2.NDArray for upload
+        if not isinstance(data, blosc2.NDArray):
+            try:
+                data = blosc2.asarray(data)
+            except Exception as e:
+                logger.error("Failed to normalize data to blosc2: %s", e)
+                return {
+                    "error": f"Could not normalize source data to blosc2.NDArray: {e}",
+                    "source": source,
+                    "source_type": resolved.normalized_from or type(resolved.data).__name__,
+                }
+        
+        # Get client and upload
+        client = _get_client()
+        if client is None:
+            raise RuntimeError("Caterva2 client is not available.")
+        
+        # Upload the data
+        result = client.upload(data, destination)
+        
+        # Extract the uploaded path
+        uploaded_path = (
+            getattr(result, "path", None)
+            or getattr(result, "name", None)
+            or destination
+        )
+        
+        return {
+            "status": "success",
+            "operation": "upload",
+            "source_name": source,
+            "source_type": resolved.source,
+            "data_shape": list(data.shape) if hasattr(data, "shape") else [],
+            "data_dtype": str(data.dtype) if hasattr(data, "dtype") else "unknown",
+            "destination_path": str(uploaded_path),
+            "server_change_applied": True,
+            "next_step": (
+                f"The uploaded dataset is now available at {uploaded_path}. "
+                "Use it in follow-up queries or share with other users."
+            ),
+        }
+    
+    except ValueError as e:
+        # Variable resolution or validation errors
+        logger.error("Failed to resolve source '%s': %s", source, e)
+        return {
+            "error": str(e),
+            "source": source,
+            "destination": destination,
+        }
+    
+    except Exception as e:
+        logger.error("Failed to upload '%s' to '%s': %s", source, destination, e)
+        return _error_with_auth_hint("upload dataset", e)

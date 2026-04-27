@@ -67,3 +67,18 @@ def test_execute_tool_typeerror_is_reported_as_invalid_arguments() -> None:
     result = json.loads(tools.execute_tool("list_datasets", {"wrong_arg": 1}))
     assert "error" in result
     assert "Invalid arguments" in result["error"]
+
+
+def test_execute_tool_upload_dataset_is_registered() -> None:
+    # What this tests: upload_dataset is in the tool registry and can be called.
+    # Why important: ensures the new tool is discoverable to the agent.
+    assert "upload_dataset" in tools.TOOL_MAP
+    assert callable(tools.TOOL_MAP["upload_dataset"])
+
+
+def test_execute_tool_upload_dataset_in_tool_schemas() -> None:
+    # What this tests: upload_dataset schema is included in TOOLS sent to LLM.
+    # Why important: the LLM must know about the tool to call it.
+    tool_names = [tool["function"]["name"] for tool in tools.TOOLS if "function" in tool]
+    assert "upload_dataset" in tool_names
+

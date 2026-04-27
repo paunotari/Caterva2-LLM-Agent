@@ -20,7 +20,7 @@ from typing import Dict, Any
 from .browsing import BROWSING_TOOLS, list_roots, list_datasets, get_dataset_info
 from .analysis import ANALYSIS_TOOLS, get_dataset_stats, collapse_dimensions
 from .data_access import DATA_ACCESS_TOOLS, get_slice, where_filter, load_dataset
-from .dataset_management import DATASET_MANAGEMENT_TOOLS, copy_dataset, download_dataset, move_dataset, remove_dataset
+from .dataset_management import DATASET_MANAGEMENT_TOOLS, copy_dataset, download_dataset, move_dataset, remove_dataset, upload_dataset
 from .visualization import VISUALIZATION_TOOLS, visualize_dataset, render_projection
 
 
@@ -64,6 +64,7 @@ TOOL_MAP = {
     "download_dataset": download_dataset,
     "move_dataset": move_dataset,
     "remove_dataset": remove_dataset,
+    "upload_dataset": upload_dataset,
     
     # Visualization tools
     "visualize_dataset": visualize_dataset,
