@@ -96,8 +96,8 @@ DATA_ACCESS_TOOLS = [
                     "persist_result": {
                         "type": "boolean",
                         "description": (
-                            "Optional (server datasets only). "
-                            "When true and authenticated, saves the sliced result as a new "
+                            "Optional (server datasets only). Defaults to true. "
+                            "When enabled and authenticated, saves the sliced result as a new "
                             "@personal dataset for follow-up server operations."
                         )
                     },
@@ -467,7 +467,7 @@ def _materialize_backend_value(value: Any) -> Any:
 def get_slice(
     path: str,
     slices: str | None = None,
-    persist_result: bool = False,
+    persist_result: bool = True,
     save_path: str | None = None,
 ) -> Dict[str, Any]:
     """
@@ -484,8 +484,8 @@ def get_slice(
         path: Server dataset path (e.g. '@public/examples/ds-1d.b2nd')
               OR local variable name (e.g. 'my_data')
         slices: Python slice syntax (e.g. '0:100', '0:5, 0:3')
-        persist_result: When true for authenticated server paths, store slice
-            result in @personal for follow-up operations.
+        persist_result: For authenticated server paths, store slice result in
+            @personal for follow-up operations (default: True).
         save_path: Optional explicit @personal destination for persistence.
     
     Returns:
@@ -545,62 +545,54 @@ def get_slice(
         
         persisted_result_path: str | None = None
         persistence_note: str | None = None
-        
-        persisted_result_path: str | None = None
-        persistence_note: str | None = None
 
-        if persist_result:
-            if resolved.is_local():
+        if persist_result and resolved.is_server():
+            auth_status = get_client_auth_status()
+            if not auth_status.get("authenticated"):
                 persistence_note = (
-                    "Persistence skipped: local variable slices are not uploaded automatically."
+                    "Persistence skipped: session is not authenticated. "
+                    "Use notebook login(...) to enable @personal persistence."
                 )
             else:
-                auth_status = get_client_auth_status()
-                if not auth_status.get("authenticated"):
-                    persistence_note = (
-                        "Persistence skipped: session is not authenticated. "
-                        "Use notebook login(...) to enable @personal persistence."
+                target_path = save_path.strip() if isinstance(save_path, str) else ""
+                if not target_path:
+                    source_name = path.rsplit("/", 1)[-1] if "/" in path else path
+                    stem = source_name.removesuffix(".b2nd").removesuffix(".b2frame")
+                    sanitized = "".join(
+                        ch if ch.isalnum() or ch in ("-", "_") else "_"
+                        for ch in stem
+                    ) or "slice"
+                    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+                    target_path = f"@personal/slices/{sanitized}_{timestamp}.b2nd"
+
+                if not target_path.startswith("@personal/"):
+                    return {
+                        "error": "save_path must start with '@personal/' for get_slice persistence.",
+                        "save_path": target_path,
+                    }
+
+                try:
+                    payload_to_upload = data
+                    if (
+                        not isinstance(payload_to_upload, blosc2.NDArray)
+                        and hasattr(payload_to_upload, "shape")
+                    ):
+                        try:
+                            payload_to_upload = blosc2.asarray(payload_to_upload)
+                        except Exception:
+                            pass
+
+                    client = _get_client()
+                    if client is None:
+                        raise RuntimeError("Caterva2 client is not available.")
+                    persisted = client.upload(payload_to_upload, target_path)
+                    persisted_result_path = (
+                        getattr(persisted, "path", None)
+                        or getattr(persisted, "name", None)
+                        or target_path
                     )
-                else:
-                    target_path = save_path.strip() if isinstance(save_path, str) else ""
-                    if not target_path:
-                        source_name = path.rsplit("/", 1)[-1] if "/" in path else path
-                        stem = source_name.removesuffix(".b2nd").removesuffix(".b2frame")
-                        sanitized = "".join(
-                            ch if ch.isalnum() or ch in ("-", "_") else "_"
-                            for ch in stem
-                        ) or "slice"
-                        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-                        target_path = f"@personal/slices/{sanitized}_{timestamp}.b2nd"
-
-                    if not target_path.startswith("@personal/"):
-                        return {
-                            "error": "save_path must start with '@personal/' for get_slice persistence.",
-                            "save_path": target_path,
-                        }
-
-                    try:
-                        payload_to_upload = data
-                        if (
-                            not isinstance(payload_to_upload, blosc2.NDArray)
-                            and hasattr(payload_to_upload, "shape")
-                        ):
-                            try:
-                                payload_to_upload = blosc2.asarray(payload_to_upload)
-                            except Exception:
-                                pass
-
-                        client = _get_client()
-                        if client is None:
-                            raise RuntimeError("Caterva2 client is not available.")
-                        persisted = client.upload(payload_to_upload, target_path)
-                        persisted_result_path = (
-                            getattr(persisted, "path", None)
-                            or getattr(persisted, "name", None)
-                            or target_path
-                        )
-                    except Exception as e:
-                        persistence_note = f"Failed to persist sliced result to '@personal': {e}"
+                except Exception as e:
+                    persistence_note = f"Failed to persist sliced result to '@personal': {e}"
         
         # Pre-compute summary for LLM presentation
         summary = _compute_summary(data)
@@ -617,7 +609,7 @@ def get_slice(
             "materialized_in_notebook": False
         }
 
-        if persist_result:
+        if resolved.is_server():
             result["stored_server_side"] = persisted_result_path is not None
             if persisted_result_path is not None:
                 result["result_path"] = str(persisted_result_path)
@@ -629,7 +621,11 @@ def get_slice(
                 )
             else:
                 result["server_change_applied"] = False
-                if persistence_note:
+                if not persist_result:
+                    result["persistence_note"] = (
+                        "Persistence disabled for this call (persist_result=False)."
+                    )
+                elif persistence_note:
                     result["persistence_note"] = persistence_note
 
         # Auto-inject local results into notebook namespace for chaining
@@ -850,73 +846,86 @@ def where_filter(
         except Exception as e:
             logger.warning(
                 f"Native where unavailable for '{path}' ({type(e).__name__}: {e}); "
-                "falling back to generic array backend."
+                "falling back to backend-normalized execution."
             )
             data_slice = resolved[slice_tuple]
+            if not isinstance(data_slice, blosc2.NDArray) and hasattr(data_slice, "shape"):
+                try:
+                    data_slice = blosc2.asarray(data_slice)
+                except Exception:
+                    pass
             operand_for_counts = data_slice
             condition_data = compare_fn(data_slice, threshold)
             v_true = data_slice if value_if_true is None else value_if_true
             if hasattr(condition_data, "where"):
-                result_data = condition_data.where(v_true, v_false)
+                result_data = _materialize_backend_value(condition_data.where(v_true, v_false))
+                execution_mode = (
+                    "blosc2_where_fallback"
+                    if isinstance(data_slice, blosc2.NDArray)
+                    else "backend_where_fallback"
+                )
             else:
                 import numpy as np
                 result_data = np.where(condition_data, v_true, v_false)
-            execution_mode = "local_numpy"
+                if hasattr(result_data, "shape"):
+                    try:
+                        result_data = blosc2.asarray(result_data)
+                        execution_mode = "blosc2_from_numpy_fallback"
+                    except Exception:
+                        execution_mode = "numpy_where_fallback"
+                else:
+                    execution_mode = "numpy_where_fallback"
 
         if save_path_clean is not None:
-            if execution_mode == "server_where" and result_obj is not None:
-                try:
-                    client = _get_client()
-                    if client is None:
-                        raise RuntimeError("Caterva2 client is not available.")
-                    # When eager mode is requested, persist the already materialized
-                    # filtered values to avoid saving backend lazy bool masks.
-                    payload_to_upload = result_obj
-                    if compute:
-                        payload_to_upload = result_data
-                        if (
-                            hasattr(payload_to_upload, "compute")
-                            and not isinstance(payload_to_upload, blosc2.NDArray)
-                        ):
-                            payload_to_upload = payload_to_upload.compute()
-                        if (
-                            not isinstance(payload_to_upload, blosc2.NDArray)
-                            and hasattr(payload_to_upload, "shape")
-                        ):
-                            try:
-                                payload_to_upload = blosc2.asarray(payload_to_upload)
-                            except Exception:
-                                # Keep backend-provided representation if conversion fails.
-                                pass
+            try:
+                client = _get_client()
+                if client is None:
+                    raise RuntimeError("Caterva2 client is not available.")
 
+                # For native server where + compute=False, keep lazy upload path.
+                if execution_mode == "server_where" and result_obj is not None and not compute:
+                    payload_to_upload = result_obj
                     if (
                         hasattr(payload_to_upload, "compute")
                         and not isinstance(payload_to_upload, blosc2.NDArray)
                     ):
-                        persisted = client.upload(payload_to_upload, save_path_clean, compute=compute)
+                        persisted = client.upload(payload_to_upload, save_path_clean, compute=False)
                     else:
                         persisted = client.upload(payload_to_upload, save_path_clean)
-                    persisted_result_path = (
-                        getattr(persisted, "path", None)
-                        or getattr(persisted, "name", None)
-                        or save_path_clean
-                    )
-                except Exception as e:
-                    logger.error(
-                        "Failed to persist where_filter result to '%s': %s",
-                        save_path_clean,
-                        e,
-                    )
-                    return {
-                        "error": f"Failed to persist filtered result to '{save_path_clean}': {e}",
-                        "path": path,
-                        "save_path": save_path_clean,
-                    }
-            else:
-                persistence_skipped_reason = (
-                    "Native server-side where execution was unavailable; "
-                    "result was not auto-saved to @personal."
+                else:
+                    payload_to_upload = result_data
+                    if (
+                        hasattr(payload_to_upload, "compute")
+                        and not isinstance(payload_to_upload, blosc2.NDArray)
+                    ):
+                        payload_to_upload = payload_to_upload.compute()
+                    if (
+                        not isinstance(payload_to_upload, blosc2.NDArray)
+                        and hasattr(payload_to_upload, "shape")
+                    ):
+                        try:
+                            payload_to_upload = blosc2.asarray(payload_to_upload)
+                        except Exception:
+                            # Keep backend-provided representation if conversion fails.
+                            pass
+                    persisted = client.upload(payload_to_upload, save_path_clean)
+
+                persisted_result_path = (
+                    getattr(persisted, "path", None)
+                    or getattr(persisted, "name", None)
+                    or save_path_clean
                 )
+            except Exception as e:
+                logger.error(
+                    "Failed to persist where_filter result to '%s': %s",
+                    save_path_clean,
+                    e,
+                )
+                return {
+                    "error": f"Failed to persist filtered result to '{save_path_clean}': {e}",
+                    "path": path,
+                    "save_path": save_path_clean,
+                }
         
         result_dtype = str(getattr(result_data, "dtype", resolved.dtype))
         result_shape = list(getattr(result_data, "shape", ()))
@@ -941,7 +950,6 @@ def where_filter(
         # Count how many elements matched the condition.
         # Avoid materializing boolean lazy conditions directly: this can segfault
         # for some backend combinations (e.g. server slices + lazy bool eval).
-        import numpy as np
         num_total = int(estimated_size)
         num_matched = 0
         try:
@@ -954,7 +962,15 @@ def where_filter(
                 operand_values = operand_for_counts
             condition_values = compare_fn(operand_values, threshold)
             num_total = int(getattr(condition_values, "size", estimated_size))
-            num_matched = int(np.sum(condition_values))
+            if hasattr(condition_values, "sum"):
+                num_matched = int(_to_json_safe(condition_values.sum()))
+            else:
+                try:
+                    condition_values_b2 = blosc2.asarray(condition_values)
+                    num_matched = int(_to_json_safe(condition_values_b2.sum()))
+                except Exception:
+                    import numpy as np
+                    num_matched = int(np.sum(condition_values))
         except Exception as e:
             logger.warning(
                 "Condition-count fallback for '%s' due to backend error: %s",
@@ -971,8 +987,17 @@ def where_filter(
                     if hasattr(result_data, "shape") and hasattr(result_data, "__getitem__"):
                         result_values = result_data[tuple(slice(None) for _ in getattr(result_data, "shape", ()))]
                     else:
-                        result_values = np.asarray(result_data)
-                    num_matched = int(np.sum(result_values == value_if_true))
+                        result_values = result_data
+                    comparison_values = result_values == value_if_true
+                    if hasattr(comparison_values, "sum"):
+                        num_matched = int(_to_json_safe(comparison_values.sum()))
+                    else:
+                        try:
+                            comparison_b2 = blosc2.asarray(comparison_values)
+                            num_matched = int(_to_json_safe(comparison_b2.sum()))
+                        except Exception:
+                            import numpy as np
+                            num_matched = int(np.sum(comparison_values))
                 except Exception:
                     num_matched = 0
         match_percentage = (num_matched / num_total * 100) if num_total > 0 else 0

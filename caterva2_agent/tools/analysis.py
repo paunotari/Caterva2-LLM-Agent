@@ -268,8 +268,9 @@ def collapse_dimensions(
     - 4D climate data (time, lat, lon, alt) → 3D spatial average
     - Density maps via summing along spatial dimensions
     
-    The result is automatically registered in the notebook namespace for
-    visualization or further manipulation.
+    Behavior:
+    - Server datasets: persist to @personal (when authenticated and persist_result=True)
+    - Local variables: auto-inject into notebook namespace for chaining
     
     Args:
         path: Server dataset path (e.g. '@public/examples/ds-3d.b2nd')
@@ -279,8 +280,9 @@ def collapse_dimensions(
               axis=1 → result shape (100, 300)
               axis=2 → result shape (100, 200)
         operation: Aggregation to apply: max, mean, sum, min, std, var, prod
-        variable_name: Optional custom name for notebook storage. If None,
-                      auto-generates like 'ds_3d_max_axis2'
+        variable_name: Optional custom name for storage handle.
+                      For server datasets, used as logical result label.
+                      For local variables, used as notebook variable name.
     
     Returns:
         Dict with result metadata and storage info, or 'error' on failure.
@@ -499,7 +501,7 @@ def collapse_dimensions(
             else:
                 note = (
                     f"Result computed ({ndim}D → {len(result_shape)}D via {operation} along axis {axis}). "
-                    "Use result_path in follow-up operations. Also registered as '{variable_name}' for reference."
+                    "Not persisted because server auth/persistence is unavailable for this call."
                 )
         
         result["note"] = note

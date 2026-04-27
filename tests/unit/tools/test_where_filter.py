@@ -472,8 +472,8 @@ def test_where_filter_prefers_server_where_when_available(monkeypatch) -> None:
     assert result["data"][-1] == 99
 
 
-def test_where_filter_falls_back_to_local_numpy_when_server_where_unavailable(monkeypatch) -> None:
-    # What this tests: server path fallback is explicit and safe when capabilities are missing.
+def test_where_filter_falls_back_to_backend_fallback_when_server_where_unavailable(monkeypatch) -> None:
+    # What this tests: server path fallback remains explicit when native server where is unavailable.
     # Why important: keeps tool robust across API/version differences.
     monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDataset1D()))
     result = data_access.where_filter(
@@ -484,7 +484,7 @@ def test_where_filter_falls_back_to_local_numpy_when_server_where_unavailable(mo
     )
 
     assert "error" not in result
-    assert result["execution_mode"] == "local_numpy"
+    assert "fallback" in result["execution_mode"]
     assert result["match_summary"]["matched"] == 4
 
 
@@ -653,14 +653,22 @@ def test_where_filter_no_auto_save_when_not_authenticated(monkeypatch) -> None:
     assert "Not auto-saved to @personal" in result["persistence_note"]
 
 
-def test_where_filter_auto_save_is_skipped_when_server_where_is_unavailable(monkeypatch) -> None:
-    # What this tests: fallback local mode reports that auto-save could not be completed.
-    # Why important: result metadata should be honest when chainable persistence is unavailable.
+def test_where_filter_auto_saves_fallback_result_when_server_where_is_unavailable(monkeypatch) -> None:
+    # What this tests: fallback mode still persists server-origin results to @personal.
+    # Why important: server-side workflows remain chainable even without native where support.
+    fake_client = _FakeUploadClient()
+    persisted_path = "@personal/where_filter/fallback_filtered.b2nd"
     monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDataset1D()))
     monkeypatch.setattr(
         data_access,
         "get_client_auth_status",
         lambda: {"authenticated": True, "urlbase": "http://test", "username": "alice"},
+    )
+    monkeypatch.setattr(data_access, "_get_client", lambda: fake_client)
+    monkeypatch.setattr(
+        data_access,
+        "_build_default_where_save_path",
+        lambda _path: persisted_path,
     )
 
     result = data_access.where_filter(
@@ -670,9 +678,9 @@ def test_where_filter_auto_save_is_skipped_when_server_where_is_unavailable(monk
     )
 
     assert "error" not in result
-    assert result["execution_mode"] == "local_numpy"
-    assert result["stored_server_side"] is False
-    assert "Native server-side where execution was unavailable" in result["persistence_note"]
+    assert "fallback" in result["execution_mode"]
+    assert result["stored_server_side"] is True
+    assert result["result_path"] == persisted_path
 
 
 def test_where_filter_avoids_condition_materialization_crashes(monkeypatch) -> None:
