@@ -11,6 +11,7 @@ Key functions:
 - ask(message): Send a question to the agent, display response
 - reset(): Clear agent memory (start fresh conversation)
 - variables(): List agent-injected variables
+- clear_variables(): Remove all agent-injected variables from notebook namespace
 - login(username=None): Prompt hidden password auth and authenticate session
 - logout(): Return Caterva2 client to anonymous mode
 - auth_status(): Show current Caterva2 authentication state
@@ -438,6 +439,44 @@ def variables() -> None:
     _display_response(md)
 
 
+def clear_variables() -> None:
+    """
+    Remove all agent-injected variables from the notebook namespace.
+    
+    This is useful when variables accumulate during a long exploration session
+    and you want to clean up the namespace without resetting the agent memory.
+    
+    The agent's conversation memory and tool history remain intact — only the
+    injected variables (loaded datasets, computed slices, etc.) are deleted.
+    
+    Example:
+        >>> variables()  # See what you have
+        >>> clear_variables()  # Delete them all
+    """
+    global _agent_objects
+    
+    injected = list_injected_variables()
+    
+    if not injected:
+        _display_response("No variables to clear.")
+        return
+    
+    # Delete from notebook namespace
+    namespace = _get_notebook_namespace()
+    if namespace is not None:
+        for name in _agent_objects:
+            if name in namespace:
+                del namespace[name]
+    
+    # Clear the tracking registry
+    deleted_count = len(_agent_objects)
+    _agent_objects.clear()
+    
+    _display_response(
+        f"✅ Cleared {deleted_count} variable{'s' if deleted_count != 1 else ''} from notebook namespace."
+    )
+
+
 # ---------------------------------------------------------------------------
 # AUTHENTICATION HELPERS
 # ---------------------------------------------------------------------------
@@ -537,9 +576,15 @@ def _display_response(response: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# CONVENIENCE ALIASES
+# PUBLIC API
 # ---------------------------------------------------------------------------
 
-# Shorter aliases for common operations
-chat = ask  # Backwards compatibility alias for "chat"
-clear = reset  # Alias for those who expect "clear" to reset
+__all__ = [
+    "ask",
+    "reset",
+    "variables",
+    "clear_variables",
+    "login",
+    "logout",
+    "auth_status",
+]

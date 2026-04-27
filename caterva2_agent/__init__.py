@@ -9,6 +9,7 @@ Main components:
 - tools: Tool schemas and implementations for dataset operations
 - config: LLM and Caterva2 server configuration
 - prompts: System prompts for agent behavior
+- notebook: Jupyter notebook interface (ask, reset, variables, clear_variables, etc.)
 """
 
 from caterva2_agent.agent import Agent
