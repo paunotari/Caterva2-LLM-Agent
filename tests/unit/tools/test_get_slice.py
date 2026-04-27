@@ -88,6 +88,17 @@ class _FakeDatasetLarge:
         return self._data[key]
 
 
+class _FakeUploadClient:
+    """Client double for verifying get_slice persistence uploads."""
+
+    def __init__(self):
+        self.calls: list[dict[str, object]] = []
+
+    def upload(self, obj, path: str, **kwargs):
+        self.calls.append({"obj": obj, "path": path, "kwargs": kwargs})
+        return types.SimpleNamespace(path=path)
+
+
 def _make_resolved(fake_dataset):
     """Helper to create a ResolvedData wrapping a fake dataset."""
     return ResolvedData(fake_dataset, source='server', name='@test/data.b2nd')
@@ -224,3 +235,103 @@ def test_get_slice_does_not_auto_register_server_data(monkeypatch) -> None:
 
     assert "error" not in result
     assert get_fetched_objects() == {}
+
+
+def test_get_slice_persist_result_saves_server_slice_when_authenticated(monkeypatch) -> None:
+    # What this tests: opt-in persistence stores server slice result in @personal.
+    # Why important: enables chaining on persisted slices without making reads stateful by default.
+    fake_client = _FakeUploadClient()
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDataset1D()))
+    monkeypatch.setattr(
+        data_access,
+        "get_client_auth_status",
+        lambda: {"authenticated": True, "urlbase": "http://test", "username": "alice"},
+    )
+    monkeypatch.setattr(data_access, "_get_client", lambda: fake_client)
+
+    result = data_access.get_slice(
+        "@public/example.b2nd",
+        slices="0:10",
+        persist_result=True,
+    )
+
+    assert "error" not in result
+    assert result["stored_server_side"] is True
+    assert result["result_path"].startswith("@personal/slices/")
+    assert fake_client.calls[0]["path"] == result["result_path"]
+
+
+def test_get_slice_persist_result_skips_when_not_authenticated(monkeypatch) -> None:
+    # What this tests: opt-in persistence reports auth requirement but still returns slice data.
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDataset1D()))
+    monkeypatch.setattr(
+        data_access,
+        "get_client_auth_status",
+        lambda: {"authenticated": False, "urlbase": "http://test", "username": None},
+    )
+
+    result = data_access.get_slice(
+        "@public/example.b2nd",
+        slices="0:10",
+        persist_result=True,
+    )
+
+    assert "error" not in result
+    assert result["stored_server_side"] is False
+    assert "not authenticated" in result["persistence_note"]
+
+
+def test_get_slice_local_variable_auto_injected_into_notebook(monkeypatch) -> None:
+    # What this tests: get_slice on local variables auto-registers result in notebook namespace.
+    # Why important: enables chaining on local data (slice → filter → analyze).
+    from caterva2_agent.tools._base import set_notebook_namespace, clear_fetched_objects, get_fetched_objects
+    
+    namespace = {"my_data": np.arange(100)}
+    set_notebook_namespace(namespace)
+    clear_fetched_objects()
+    
+    result = data_access.get_slice("my_data", slices="0:10")
+    
+    assert "error" not in result
+    assert "injected_as_variable" in result
+    injected_name = result["injected_as_variable"]
+    assert injected_name.startswith("sliced_mydata")
+    
+    # Verify the result is registered in the namespace
+    fetched = get_fetched_objects()
+    assert injected_name in fetched
+    assert len(fetched[injected_name]) == 10  # First 10 elements
+    
+    # Cleanup
+    set_notebook_namespace(None)
+    clear_fetched_objects()
+
+
+def test_get_slice_local_variable_chaining_support(monkeypatch) -> None:
+    # What this tests: result of get_slice on local data can be used by where_filter.
+    # Why important: demonstrates full chaining workflow for local operations.
+    from caterva2_agent.tools._base import set_notebook_namespace, clear_fetched_objects
+    
+    namespace = {"my_data": np.arange(100)}
+    set_notebook_namespace(namespace)
+    clear_fetched_objects()
+    
+    # First operation: slice
+    result1 = data_access.get_slice("my_data", slices="0:50")
+    assert "error" not in result1
+    assert "injected_as_variable" in result1
+    sliced_var_name = result1["injected_as_variable"]
+    
+    # Second operation: use the sliced result as input to where_filter
+    result2 = data_access.where_filter(
+        sliced_var_name,
+        operator=">",
+        threshold=25
+    )
+    
+    assert "error" not in result2
+    assert result2["match_summary"]["matched"] > 0
+    
+    # Cleanup
+    set_notebook_namespace(None)
+    clear_fetched_objects()

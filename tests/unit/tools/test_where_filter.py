@@ -49,7 +49,12 @@ def _ensure_local_import_bootstrap() -> None:
 
 _ensure_local_import_bootstrap()
 from caterva2_agent.tools import data_access
-from caterva2_agent.tools._base import ResolvedData, get_fetched_objects, clear_fetched_objects
+from caterva2_agent.tools._base import (
+    ResolvedData,
+    get_fetched_objects,
+    clear_fetched_objects,
+    set_notebook_namespace,
+)
 
 
 class _FakeDataset1D:
@@ -166,6 +171,171 @@ class _FakeServerWhereDataset:
 
     def __ne__(self, threshold):
         return _FakeServerOperand(self._data) != threshold
+
+
+class _LazyMaskWhereExpr:
+    """Lazy where expression that materializes to values but exposes bool mask shape/dtype."""
+
+    def __init__(self, mask: np.ndarray, source_values: np.ndarray, true_value, false_value):
+        self._mask = np.asarray(mask, dtype=bool)
+        self._source_values = np.asarray(source_values)
+        self._true_value = true_value
+        self._false_value = false_value
+        self.shape = self._mask.shape
+        self.dtype = np.dtype(bool)
+
+    def compute(self):
+        true_values = self._source_values if self._true_value is None else self._true_value
+        false_values = 0 if self._false_value is None else self._false_value
+        return np.where(self._mask, true_values, false_values)
+
+    def __getitem__(self, key):
+        return self._mask[key]
+
+
+class _BuggyPersistCondition:
+    """Condition object whose lazy where payload appears boolean until computed."""
+
+    def __init__(self, mask: np.ndarray, source_values: np.ndarray):
+        self._mask = np.asarray(mask, dtype=bool)
+        self._source_values = np.asarray(source_values)
+
+    def where(self, value1=None, value2=None):
+        return _LazyMaskWhereExpr(self._mask, self._source_values, value1, value2)
+
+
+class _BuggyPersistOperand:
+    """Operand returning lazy where expressions that can be mis-uploaded as bool."""
+
+    def __init__(self, data: np.ndarray):
+        self._data = np.asarray(data)
+        self.shape = self._data.shape
+        self.dtype = self._data.dtype
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def __lt__(self, threshold):
+        return _BuggyPersistCondition(self._data < threshold, self._data)
+
+
+class _BuggyPersistWhereDataset:
+    """Server dataset whose lazy where object must be materialized before upload."""
+
+    def __init__(self):
+        self.shape = (10,)
+        self.dtype = "int64"
+        self._data = np.arange(10)
+
+    def slice(self, key, as_blosc2=True):
+        return _BuggyPersistOperand(self._data[key])
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def __lt__(self, threshold):
+        return _BuggyPersistCondition(self._data < threshold, self._data)
+
+
+class _FakeUploadClient:
+    """Client double for verifying server-side persistence uploads."""
+
+    def __init__(self):
+        self.calls: list[dict[str, object]] = []
+
+    def upload(self, obj, path: str, **kwargs):
+        call = {"obj": obj, "path": path}
+        call.update(kwargs)
+        self.calls.append(call)
+        return types.SimpleNamespace(path=path)
+
+
+class _StrictUploadClient:
+    """Upload client that rejects compute kwarg for non-lazy payloads."""
+
+    def __init__(self):
+        self.calls: list[dict[str, object]] = []
+
+    def upload(self, obj, path: str, **kwargs):
+        if "compute" in kwargs and not hasattr(obj, "compute"):
+            raise RuntimeError("compute argument cannot be specified for non-LazyArray objects.")
+        self.calls.append({"obj": obj, "path": path, "kwargs": kwargs})
+        return types.SimpleNamespace(path=path)
+
+
+class _PersistedStatsDataset:
+    """Persisted dataset stub with deterministic server-side stats."""
+
+    def __init__(self):
+        self.shape = (4,)
+        self.dtype = "float32"
+        self._data = np.array([123, 123, 123, 123], dtype=np.float32)
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def min(self):
+        return np.float32(123)
+
+    def max(self):
+        return np.float32(123)
+
+    def mean(self):
+        return np.float32(123)
+
+
+class _CrashyCondition:
+    """Condition object that crashes if directly materialized."""
+
+    def __init__(self, mask: np.ndarray, source_values: np.ndarray):
+        self._mask = np.asarray(mask, dtype=bool)
+        self._source_values = np.asarray(source_values)
+        self.shape = self._mask.shape
+        self.size = self._mask.size
+
+    def where(self, value1=None, value2=None):
+        true_values = self._source_values if value1 is None else np.asarray(value1)
+        false_values = 0 if value2 is None else value2
+        return _FakeServerOperand(np.where(self._mask, true_values, false_values))
+
+    def compute(self):
+        raise RuntimeError("simulated condition materialization crash")
+
+    def __getitem__(self, _key):
+        raise RuntimeError("simulated condition slice crash")
+
+
+class _CrashyOperand:
+    """Operand that returns crashy conditions but supports safe slicing."""
+
+    def __init__(self, data: np.ndarray):
+        self._data = np.asarray(data)
+        self.shape = self._data.shape
+        self.dtype = self._data.dtype
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def __lt__(self, threshold):
+        return _CrashyCondition(self._data < threshold, self._data)
+
+
+class _CrashyWhereDataset:
+    """Server dataset whose condition lazy materialization is unsafe."""
+
+    def __init__(self):
+        self.shape = (100,)
+        self.dtype = "int64"
+        self._data = np.arange(100)
+
+    def slice(self, key, as_blosc2=True):
+        return _CrashyOperand(self._data[key])
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def __lt__(self, threshold):
+        return _CrashyCondition(self._data < threshold, self._data)
 
 
 def _make_resolved(fake_dataset):
@@ -302,8 +472,8 @@ def test_where_filter_prefers_server_where_when_available(monkeypatch) -> None:
     assert result["data"][-1] == 99
 
 
-def test_where_filter_falls_back_to_local_numpy_when_server_where_unavailable(monkeypatch) -> None:
-    # What this tests: server path fallback is explicit and safe when capabilities are missing.
+def test_where_filter_falls_back_to_backend_fallback_when_server_where_unavailable(monkeypatch) -> None:
+    # What this tests: server path fallback remains explicit when native server where is unavailable.
     # Why important: keeps tool robust across API/version differences.
     monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDataset1D()))
     result = data_access.where_filter(
@@ -314,8 +484,229 @@ def test_where_filter_falls_back_to_local_numpy_when_server_where_unavailable(mo
     )
 
     assert "error" not in result
-    assert result["execution_mode"] == "local_numpy"
+    assert "fallback" in result["execution_mode"]
     assert result["match_summary"]["matched"] == 4
+
+
+def test_where_filter_auto_saves_server_result_to_personal_when_authenticated(monkeypatch) -> None:
+    # What this tests: server where result is auto-saved to @personal by default.
+    # Why important: enables chaining without asking the model to provide save_path.
+    fake_client = _FakeUploadClient()
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeServerWhereDataset()))
+    monkeypatch.setattr(
+        data_access,
+        "get_client_auth_status",
+        lambda: {"authenticated": True, "urlbase": "http://test", "username": "alice"},
+    )
+    monkeypatch.setattr(data_access, "_get_client", lambda: fake_client)
+    monkeypatch.setattr(
+        data_access,
+        "_build_default_where_save_path",
+        lambda _path: "@personal/where_filter/auto_filtered.b2nd",
+    )
+
+    result = data_access.where_filter(
+        path="@public/example.b2nd",
+        operator=">",
+        threshold=95,
+        slices="0:100",
+    )
+
+    assert "error" not in result
+    assert result["execution_mode"] == "server_where"
+    assert result["stored_server_side"] is True
+    assert result["auto_saved_to_personal"] is True
+    assert result["result_path"] == "@personal/where_filter/auto_filtered.b2nd"
+    assert fake_client.calls[0]["path"] == "@personal/where_filter/auto_filtered.b2nd"
+    assert "compute" not in fake_client.calls[0]
+
+
+def test_where_filter_auto_save_uploads_materialized_values_when_compute_true(monkeypatch) -> None:
+    # What this tests: eager server auto-save uploads computed replacement values, not lazy bool masks.
+    # Why important: avoids persisting boolean datasets when caller requested numeric replacements.
+    fake_client = _StrictUploadClient()
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_BuggyPersistWhereDataset()))
+    monkeypatch.setattr(
+        data_access,
+        "get_client_auth_status",
+        lambda: {"authenticated": True, "urlbase": "http://test", "username": "alice"},
+    )
+    monkeypatch.setattr(data_access, "_get_client", lambda: fake_client)
+    monkeypatch.setattr(
+        data_access,
+        "_build_default_where_save_path",
+        lambda _path: "@personal/where_filter/materialized_filtered.b2nd",
+    )
+
+    result = data_access.where_filter(
+        path="@public/example.b2nd",
+        operator="<",
+        threshold=5,
+        value_if_true=5,
+        value_if_false=20,
+        compute=True,
+    )
+
+    assert "error" not in result
+    uploaded = fake_client.calls[0]["obj"]
+    assert "compute" not in fake_client.calls[0]["kwargs"]
+    if hasattr(uploaded, "shape") and hasattr(uploaded, "__getitem__"):
+        uploaded_values = uploaded[tuple(slice(None) for _ in uploaded.shape)]
+    else:
+        uploaded_values = np.asarray(uploaded)
+
+    unique_values = set(np.asarray(uploaded_values).ravel().tolist())
+    assert unique_values == {5, 20}
+
+
+def test_where_filter_uses_persisted_server_dataset_for_summary_when_auto_saved(monkeypatch) -> None:
+    # What this tests: summary metadata for auto-saved server where uses persisted dataset stats path.
+    # Why important: keeps post-filter stats aligned with server-side persisted artifact.
+    fake_client = _FakeUploadClient()
+    source_dataset = _FakeServerWhereDataset()
+    persisted_path = "@personal/where_filter/server_stats_filtered.b2nd"
+
+    def _resolve(path: str):
+        if path == "@public/example.b2nd":
+            return _make_resolved(source_dataset)
+        if path == persisted_path:
+            return ResolvedData(_PersistedStatsDataset(), source="server", name=persisted_path)
+        raise AssertionError(f"Unexpected resolve_data path: {path}")
+
+    monkeypatch.setattr(data_access, "resolve_data", _resolve)
+    monkeypatch.setattr(
+        data_access,
+        "get_client_auth_status",
+        lambda: {"authenticated": True, "urlbase": "http://test", "username": "alice"},
+    )
+    monkeypatch.setattr(data_access, "_get_client", lambda: fake_client)
+    monkeypatch.setattr(
+        data_access,
+        "_build_default_where_save_path",
+        lambda _path: persisted_path,
+    )
+
+    result = data_access.where_filter(
+        path="@public/example.b2nd",
+        operator=">",
+        threshold=95,
+        compute=True,
+    )
+
+    assert "error" not in result
+    assert result["stored_server_side"] is True
+    assert result["result_path"] == persisted_path
+    assert result["summary"]["mean"] == 123.0
+    assert result["summary"]["min"] == 123.0
+    assert result["summary"]["max"] == 123.0
+    assert result["result_shape"] == [4]
+    assert result["dtype"] == "float32"
+
+
+def test_where_filter_compute_false_keeps_lazy_upload_mode(monkeypatch) -> None:
+    # What this tests: callers can still opt out of eager materialization.
+    # Why important: preserves advanced chaining option for server-side lazy workflows.
+    fake_client = _FakeUploadClient()
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_BuggyPersistWhereDataset()))
+    monkeypatch.setattr(
+        data_access,
+        "get_client_auth_status",
+        lambda: {"authenticated": True, "urlbase": "http://test", "username": "alice"},
+    )
+    monkeypatch.setattr(data_access, "_get_client", lambda: fake_client)
+    monkeypatch.setattr(
+        data_access,
+        "_build_default_where_save_path",
+        lambda _path: "@personal/where_filter/lazy_filtered.b2nd",
+    )
+
+    result = data_access.where_filter(
+        path="@public/example.b2nd",
+        operator="<",
+        threshold=5,
+        compute=False,
+    )
+
+    assert "error" not in result
+    assert result["compute_on_save"] is False
+    assert fake_client.calls[0]["compute"] is False
+
+
+def test_where_filter_no_auto_save_when_not_authenticated(monkeypatch) -> None:
+    # What this tests: server filtering still works anonymously but persistence is skipped.
+    # Why important: preserves read-only usage while making persistence requirements explicit.
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeServerWhereDataset()))
+    monkeypatch.setattr(
+        data_access,
+        "get_client_auth_status",
+        lambda: {"authenticated": False, "urlbase": "http://test", "username": None},
+    )
+
+    result = data_access.where_filter(
+        path="@public/example.b2nd",
+        operator=">",
+        threshold=95,
+    )
+
+    assert "error" not in result
+    assert result["stored_server_side"] is False
+    assert "Not auto-saved to @personal" in result["persistence_note"]
+
+
+def test_where_filter_auto_saves_fallback_result_when_server_where_is_unavailable(monkeypatch) -> None:
+    # What this tests: fallback mode still persists server-origin results to @personal.
+    # Why important: server-side workflows remain chainable even without native where support.
+    fake_client = _FakeUploadClient()
+    persisted_path = "@personal/where_filter/fallback_filtered.b2nd"
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_FakeDataset1D()))
+    monkeypatch.setattr(
+        data_access,
+        "get_client_auth_status",
+        lambda: {"authenticated": True, "urlbase": "http://test", "username": "alice"},
+    )
+    monkeypatch.setattr(data_access, "_get_client", lambda: fake_client)
+    monkeypatch.setattr(
+        data_access,
+        "_build_default_where_save_path",
+        lambda _path: persisted_path,
+    )
+
+    result = data_access.where_filter(
+        path="@public/example.b2nd",
+        operator=">",
+        threshold=95,
+    )
+
+    assert "error" not in result
+    assert "fallback" in result["execution_mode"]
+    assert result["stored_server_side"] is True
+    assert result["result_path"] == persisted_path
+
+
+def test_where_filter_avoids_condition_materialization_crashes(monkeypatch) -> None:
+    # What this tests: where_filter no longer materializes boolean condition objects directly.
+    # Why important: avoids backend segfault/crash path observed on server-sliced LazyExpr conditions.
+    monkeypatch.setattr(data_access, "resolve_data", lambda _path: _make_resolved(_CrashyWhereDataset()))
+    monkeypatch.setattr(
+        data_access,
+        "get_client_auth_status",
+        lambda: {"authenticated": False, "urlbase": "http://test", "username": None},
+    )
+
+    result = data_access.where_filter(
+        path="@public/example.b2nd",
+        operator="<",
+        threshold=5,
+        slices="0:10",
+        value_if_true=5,
+        value_if_false=100,
+    )
+
+    assert "error" not in result
+    assert result["match_summary"]["matched"] == 5
+    assert result["match_summary"]["total"] == 10
+    assert result["data"][:5] == [5, 5, 5, 5, 5]
+    assert result["data"][5:] == [100, 100, 100, 100, 100]
 
 
 # ---------------------------------------------------------------------------
@@ -477,3 +868,48 @@ def test_where_filter_does_not_auto_register_server_data(monkeypatch) -> None:
 
     assert "error" not in result
     assert get_fetched_objects() == {}
+
+
+def test_where_filter_local_numpy_input_uses_blosc2_path() -> None:
+    # What this tests: local NumPy inputs are normalized and filtered via Blosc2-native path.
+    # Why important: migration goal is Blosc2-first internal execution.
+    local_np = np.arange(10, dtype=np.int64)
+    set_notebook_namespace({"local_np": local_np})
+
+    result = data_access.where_filter(
+        path="local_np",
+        operator=">",
+        threshold=5,
+        slices="0:10"
+    )
+
+    assert "error" not in result
+    assert result["execution_mode"] == "blosc2_where"
+    assert result["match_summary"]["matched"] == 4
+
+
+def test_where_filter_local_result_auto_injected_into_notebook() -> None:
+    # What this tests: small local where_filter results are auto-injected into notebook namespace.
+    # Why important: users don't lose filtered data after agent turn completes.
+    local_np = np.arange(10, dtype=np.int64)
+    namespace = {"local_np": local_np}
+    set_notebook_namespace(namespace)
+    clear_fetched_objects()
+
+    result = data_access.where_filter(
+        path="local_np",
+        operator=">",
+        threshold=5,
+        slices="0:10"
+    )
+
+    assert "error" not in result
+    assert result["execution_mode"] == "blosc2_where"
+    assert result["match_summary"]["matched"] == 4
+    assert "injected_as_variable" in result
+    injected_var = result["injected_as_variable"]
+    assert injected_var in namespace
+    assert np.array_equal(namespace[injected_var], result["data"])
+    
+    fetched = get_fetched_objects()
+    assert injected_var in fetched

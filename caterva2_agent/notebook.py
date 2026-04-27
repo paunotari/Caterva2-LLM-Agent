@@ -139,7 +139,7 @@ def inject_variable(name: str, value: Any) -> str:
     
     Args:
         name: Base name for the variable (will be sanitized and made unique)
-        value: The value to inject (typically a numpy array)
+        value: The value to inject (typically a blosc2-backed array)
     
     Returns:
         The actual variable name used (after sanitization and uniqueness)
@@ -283,7 +283,7 @@ def _expand_variable_references(message: str, namespace: dict) -> tuple[str, lis
             raise ValueError(
                 f"Variable '{var_name}' is not an array "
                 f"(type: {type(value).__name__}). "
-                f"Only numpy arrays and similar objects can be referenced."
+                "Only array-like objects (blosc2/NumPy and similar) can be referenced."
             )
         
         descriptions.append(_describe_variable(var_name, value))

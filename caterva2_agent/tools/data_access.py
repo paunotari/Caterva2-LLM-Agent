@@ -12,11 +12,22 @@ Works with both:
 """
 
 import logging
+from datetime import datetime, timezone
 from typing import Dict, Any
+
+import blosc2
 
 logger = logging.getLogger('caterva2_agent')
 
-from ._base import resolve_data, _to_json_safe, register_fetched_object
+from ._base import (
+    resolve_data,
+    _to_json_safe,
+    register_fetched_object,
+    _get_client,
+    get_client_auth_status,
+    get_notebook_namespace,
+    ResolvedData,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +68,8 @@ DATA_ACCESS_TOOLS = [
                     "Use this when the user wants to see actual data, not just statistics. "
                     "For large slices, returns metadata + summary by default instead of full values. "
                     "To materialize data into the notebook namespace, use load_dataset explicitly. "
+                    "For local variables, automatically registers the slice result in the notebook "
+                    "namespace for use in follow-up operations. "
                     "Works with both server datasets (@path) and local variables (variable_name)."
                 ),
             "parameters": {
@@ -79,6 +92,22 @@ DATA_ACCESS_TOOLS = [
                             "For 3D+: '0, :, 0:10' etc. Separate dimensions with commas. "
                             "Defaults to first elements up to the limit if not specified."
                         )
+                    },
+                    "persist_result": {
+                        "type": "boolean",
+                        "description": (
+                            "Optional (server datasets only). Defaults to true. "
+                            "When enabled and authenticated, saves the sliced result as a new "
+                            "@personal dataset for follow-up server operations."
+                        )
+                    },
+                    "save_path": {
+                        "type": "string",
+                        "description": (
+                            "Optional destination path for persistence when persist_result=true. "
+                            "Must start with '@personal/'. If omitted, auto-generates a path under "
+                            "'@personal/slices/'."
+                        )
                     }
                 },
                 "required": ["path"]
@@ -95,6 +124,8 @@ DATA_ACCESS_TOOLS = [
                     "Example use case: for elevation data, filter peaks above 3000m by returning "
                     "the actual elevation where > 3000, and 0 (or NaN) elsewhere. "
                     "This is useful for masking, thresholding, or highlighting specific data regions. "
+                    "For authenticated server sessions, filtered results are auto-saved to "
+                    "a generated '@personal/where_filter/...' dataset path for chaining. "
                     "For large results, returns metadata + summary by default instead of full values. "
                     "To materialize full data into the notebook namespace, use load_dataset explicitly. "
                     "Works with both server datasets (@path) and local variables (variable_name)."
@@ -149,6 +180,14 @@ DATA_ACCESS_TOOLS = [
                             "Optional slice specification to limit the filter to a region. "
                             "Same syntax as get_slice. Highly recommended for large datasets."
                         )
+                    },
+                    "compute": {
+                        "type": "boolean",
+                        "description": (
+                            "Only used for server datasets when authenticated. "
+                            "True (default): compute and materialize result on server during auto-save. "
+                            "False: store lazy expression wrapper."
+                        )
                     }
                 },
                 "required": ["path", "operator", "threshold"]
@@ -165,7 +204,7 @@ DATA_ACCESS_TOOLS = [
                     "SAFETY: This is explicit materialization and enforces strict size checks "
                     "(including a 100MB cap) before loading. "
                     "For large datasets, the tool suggests slice/filter/projection workflows. "
-                    "The loaded data becomes available as a numpy array variable in the notebook. "
+                    "The loaded data becomes available as a blosc2-backed variable in the notebook. "
                     "Works with both server datasets (@path) and local variables (variable_name)."
                 ),
             "parameters": {
@@ -304,10 +343,32 @@ def _generate_preview(data, max_chars: int = 200) -> str:
     
     Shows the structure without overwhelming the output.
     """
-    full_str = str(data.tolist() if hasattr(data, 'tolist') else data)
+    preview_obj = data
+
+    # For large arrays, preview only a tiny corner instead of full materialization.
+    if hasattr(data, "shape") and hasattr(data, "__getitem__"):
+        shape = tuple(getattr(data, "shape", ()))
+        if shape and _shape_product(shape) > 64:
+            ndim = len(shape)
+            per_dim = max(1, int(round(64 ** (1.0 / ndim))))
+            preview_key = tuple(slice(0, min(int(dim), per_dim)) for dim in shape)
+            try:
+                preview_obj = data[preview_key]
+            except Exception:
+                preview_obj = data
+
+    full_str = str(_to_json_safe(preview_obj))
     if len(full_str) <= max_chars:
         return full_str
     return full_str[:max_chars] + "..."
+
+
+def _shape_product(shape: tuple[int, ...] | list[int]) -> int:
+    """Compute number of elements from a shape tuple/list."""
+    total = 1
+    for dim in shape:
+        total *= int(dim)
+    return total
 
 
 def _compute_summary(data) -> Dict[str, Any]:
@@ -317,34 +378,44 @@ def _compute_summary(data) -> Dict[str, Any]:
     Pre-computes stats so the LLM can present a summary without
     showing all raw values. Also prepares for future viz tools.
     """
-    import numpy as np
-    
-    arr = np.asarray(data)
-    num_elements = arr.size
+    num_elements_attr = getattr(data, "size", None)
+    if num_elements_attr is not None:
+        num_elements = int(num_elements_attr)
+    else:
+        shape = tuple(getattr(data, "shape", ()))
+        num_elements = _shape_product(shape) if shape else 1
     
     summary = {
         "num_elements": num_elements,
-        "preview": _generate_preview(arr),
+        "preview": _generate_preview(data),
     }
     
-    # Only compute numeric stats for numeric dtypes
-    if np.issubdtype(arr.dtype, np.number):
-        summary["min"] = _to_json_safe(arr.min())
-        summary["max"] = _to_json_safe(arr.max())
-        summary["mean"] = _to_json_safe(arr.mean())
+    # Compute numeric-like stats when backend supports these reductions.
+    if all(hasattr(data, stat) for stat in ("min", "max", "mean")):
+        try:
+            summary["min"] = _to_json_safe(data.min())
+            summary["max"] = _to_json_safe(data.max())
+            summary["mean"] = _to_json_safe(data.mean())
+        except (TypeError, ValueError):
+            pass
     
     return summary
 
 
 def _estimate_nbytes(num_elements: int, dtype: Any) -> int | None:
     """Estimate payload size in bytes from element count and dtype."""
-    import numpy as np
-
+    itemsize = getattr(dtype, "itemsize", None)
+    if itemsize is None:
+        try:
+            probe = blosc2.zeros((1,), dtype=dtype)
+            itemsize = probe.dtype.itemsize
+        except Exception:
+            return None
     try:
-        itemsize = np.dtype(dtype).itemsize
+        itemsize_int = int(itemsize)
     except (TypeError, ValueError):
         return None
-    return int(num_elements) * int(itemsize)
+    return int(num_elements) * itemsize_int
 
 
 def _operation_warning(estimated_elements: int, estimated_nbytes: int | None) -> str | None:
@@ -367,41 +438,38 @@ def _operation_warning(estimated_elements: int, estimated_nbytes: int | None) ->
     )
 
 
-def _materialize_to_numpy(value: Any) -> Any:
+def _materialize_backend_value(value: Any) -> Any:
     """
-    Materialize Caterva2/LazyExpr-like values to a NumPy array when possible.
+    Materialize Caterva2/LazyExpr-like values while keeping Blosc2-backed data.
 
-    This helper lets where_filter try server-side expression execution first,
-    then materialize only for summaries / optional inline data.
+    This helper avoids eager NumPy conversion and keeps internal computation
+    in backends that support compressed operations.
     """
-    import numpy as np
-
-    if isinstance(value, np.ndarray):
-        return value
-
     if hasattr(value, "compute"):
-        return np.asarray(value.compute())
-
-    if hasattr(value, "__array__"):
-        return np.asarray(value)
+        return value.compute()
 
     if hasattr(value, "slice"):
         try:
-            return np.asarray(value.slice(slice(None), as_blosc2=False))
+            return value.slice(slice(None), as_blosc2=True)
         except Exception:
             pass
 
     try:
-        return np.asarray(value[:])
+        return value[:]
     except Exception:
-        return np.asarray(value)
+        return value
 
 
 # ---------------------------------------------------------------------------
 # TOOL IMPLEMENTATIONS
 # ---------------------------------------------------------------------------
 
-def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
+def get_slice(
+    path: str,
+    slices: str | None = None,
+    persist_result: bool = True,
+    save_path: str | None = None,
+) -> Dict[str, Any]:
     """
     Retrieve a slice of data from a dataset or local variable.
     
@@ -416,6 +484,9 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
         path: Server dataset path (e.g. '@public/examples/ds-1d.b2nd')
               OR local variable name (e.g. 'my_data')
         slices: Python slice syntax (e.g. '0:100', '0:5, 0:3')
+        persist_result: For authenticated server paths, store slice result in
+            @personal for follow-up operations (default: True).
+        save_path: Optional explicit @personal destination for persistence.
     
     Returns:
         Dict with slice metadata, summary, and data values, or 'error' on failure.
@@ -461,6 +532,68 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
         # Fetch the data
         data = resolved[slice_tuple]
         
+        # For blosc2-first architecture: normalize to blosc2 if needed
+        # (Server datasets return numpy via resolved[...], local blosc2 stay blosc2)
+        if not isinstance(data, blosc2.NDArray) and hasattr(data, "shape"):
+            try:
+                logger.debug(f"Normalizing fetched data to blosc2, original type: {type(data)}")
+                data = blosc2.asarray(data)
+            except Exception as e:
+                # Keep original if conversion fails
+                logger.debug(f"Could not normalize to blosc2: {e}, keeping as {type(data)}")
+                pass
+        
+        persisted_result_path: str | None = None
+        persistence_note: str | None = None
+
+        if persist_result and resolved.is_server():
+            auth_status = get_client_auth_status()
+            if not auth_status.get("authenticated"):
+                persistence_note = (
+                    "Persistence skipped: session is not authenticated. "
+                    "Use notebook login(...) to enable @personal persistence."
+                )
+            else:
+                target_path = save_path.strip() if isinstance(save_path, str) else ""
+                if not target_path:
+                    source_name = path.rsplit("/", 1)[-1] if "/" in path else path
+                    stem = source_name.removesuffix(".b2nd").removesuffix(".b2frame")
+                    sanitized = "".join(
+                        ch if ch.isalnum() or ch in ("-", "_") else "_"
+                        for ch in stem
+                    ) or "slice"
+                    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+                    target_path = f"@personal/slices/{sanitized}_{timestamp}.b2nd"
+
+                if not target_path.startswith("@personal/"):
+                    return {
+                        "error": "save_path must start with '@personal/' for get_slice persistence.",
+                        "save_path": target_path,
+                    }
+
+                try:
+                    payload_to_upload = data
+                    if (
+                        not isinstance(payload_to_upload, blosc2.NDArray)
+                        and hasattr(payload_to_upload, "shape")
+                    ):
+                        try:
+                            payload_to_upload = blosc2.asarray(payload_to_upload)
+                        except Exception:
+                            pass
+
+                    client = _get_client()
+                    if client is None:
+                        raise RuntimeError("Caterva2 client is not available.")
+                    persisted = client.upload(payload_to_upload, target_path)
+                    persisted_result_path = (
+                        getattr(persisted, "path", None)
+                        or getattr(persisted, "name", None)
+                        or target_path
+                    )
+                except Exception as e:
+                    persistence_note = f"Failed to persist sliced result to '@personal': {e}"
+        
         # Pre-compute summary for LLM presentation
         summary = _compute_summary(data)
         
@@ -475,6 +608,48 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
             "summary": summary,
             "materialized_in_notebook": False
         }
+
+        if resolved.is_server():
+            result["stored_server_side"] = persisted_result_path is not None
+            if persisted_result_path is not None:
+                result["result_path"] = str(persisted_result_path)
+                result["save_path"] = str(persisted_result_path)
+                result["server_change_applied"] = True
+                result["_next_step_hint"] = (
+                    "Use result_path in follow-up server operations "
+                    "(get_slice, where_filter, collapse_dimensions, visualize_dataset)."
+                )
+            else:
+                result["server_change_applied"] = False
+                if not persist_result:
+                    result["persistence_note"] = (
+                        "Persistence disabled for this call (persist_result=False)."
+                    )
+                elif persistence_note:
+                    result["persistence_note"] = persistence_note
+
+        # Auto-inject local results into notebook namespace for chaining
+        injected_var_name: str | None = None
+        if is_local:
+            try:
+                namespace = get_notebook_namespace()
+                if namespace is not None:
+                    # Generate a unique variable name for the sliced result
+                    base_name = path.replace("_", "").replace("-", "").replace(".", "_")
+                    base_name = f"sliced_{base_name}"
+                    counter = 1
+                    var_name = base_name
+                    while var_name in namespace:
+                        var_name = f"{base_name}_{counter}"
+                        counter += 1
+                    
+                    # Inject into notebook namespace
+                    namespace[var_name] = data
+                    injected_var_name = var_name
+                    register_fetched_object(var_name, data)
+                    logger.info(f"Auto-injected local get_slice result as '{var_name}'")
+            except Exception as e:
+                logger.debug(f"Could not auto-inject local get_slice result: {e}")
 
         if estimated_nbytes is not None:
             result["estimated_size_mb"] = round(estimated_nbytes / (1024 * 1024), 2)
@@ -494,6 +669,10 @@ def get_slice(path: str, slices: str | None = None) -> Dict[str, Any]:
                 "Full data omitted from tool output due to context-size policy. "
                 "Operation was executed, but only metadata and summary are returned."
             )
+        
+        # Add injected variable name if applicable
+        if injected_var_name is not None:
+            result["injected_as_variable"] = injected_var_name
         
         return result
     
@@ -521,13 +700,25 @@ COMPARISON_OPERATORS = {
 }
 
 
+def _build_default_where_save_path(path: str) -> str:
+    """Build a unique @personal path for persisted where_filter results."""
+    source_name = path.rsplit("/", 1)[-1] if "/" in path else path
+    stem = source_name.removesuffix(".b2nd").removesuffix(".b2frame")
+    sanitized = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in stem)
+    if not sanitized:
+        sanitized = "filtered"
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    return f"@personal/where_filter/{sanitized}_{timestamp}.b2nd"
+
+
 def where_filter(
     path: str,
     operator: str,
     threshold: float,
     value_if_true: float | None = None,
     value_if_false: float | None = None,
-    slices: str | None = None
+    slices: str | None = None,
+    compute: bool = True,
 ) -> Dict[str, Any]:
     """
     Filter dataset or local variable values based on a condition.
@@ -537,9 +728,8 @@ def where_filter(
     - value_if_false where the condition is not met
     
     Execution strategy:
-    - Local variables: NumPy local path
-    - Server datasets: attempt Caterva2 server-side expression + where path first;
-      fallback to local NumPy if that capability is unavailable.
+    - Prefer backend-native where execution for both server and local data.
+    - Fallback to generic array backend only when native where is unavailable.
     
     Use cases:
     - Thresholding: elevation > 3000 → show peaks, mask valleys
@@ -554,6 +744,9 @@ def where_filter(
         value_if_true: Value where condition is True (default: original data)
         value_if_false: Value where condition is False (default: 0)
         slices: Optional slice to limit the region (recommended for large datasets)
+        compute: For server datasets with authenticated sessions, controls auto-save mode.
+                 True (default): compute and materialize result during upload.
+                 False: keep lazy expression wrapper.
     
     Returns:
         Dict with filtered data, condition info, and summary, or 'error' on failure.
@@ -577,6 +770,19 @@ def where_filter(
     try:
         resolved = resolve_data(path)
         shape = resolved.shape
+
+        save_path_clean: str | None = None
+        auto_save_requested = False
+        if resolved.is_server():
+            auth_status = get_client_auth_status()
+            if auth_status.get("authenticated"):
+                save_path_clean = _build_default_where_save_path(path)
+                auto_save_requested = True
+            else:
+                logger.debug(
+                    "Skipping @personal auto-save for where_filter('%s') because session is not authenticated.",
+                    path,
+                )
         
         # Determine slice to apply.
         # If no slice is provided, run on full dataset by default.
@@ -607,60 +813,203 @@ def where_filter(
         logger.debug(f"Estimated elements: {estimated_size}")
         
         compare_fn = COMPARISON_OPERATORS[operator]
-        import numpy as np
         v_false = 0 if value_if_false is None else value_if_false
-        execution_mode = "local_numpy"
+        execution_mode = "blosc2_where"
+        operand_for_counts: Any | None = None
+        result_obj: Any | None = None
+        persisted_result_path: str | None = None
+        persistence_skipped_reason: str | None = None
 
-        # Server datasets: try server-side where first.
-        if resolved.is_server():
-            try:
-                server_operand = resolved.data
-                if slices is not None:
-                    if not hasattr(server_operand, "slice"):
-                        raise AttributeError("Dataset.slice() is unavailable")
-                    server_operand = server_operand.slice(slice_tuple, as_blosc2=True)
+        try:
+            operand = resolved.data
+            if slices is not None:
+                if hasattr(operand, "slice"):
+                    if resolved.is_server():
+                        # Server datasets: use as_blosc2=True to materialize to blosc2
+                        operand = operand.slice(slice_tuple, as_blosc2=True)
+                    else:
+                        # Local blosc2 arrays: use standard slice (blosc2 .slice() doesn't take as_blosc2)
+                        operand = operand.slice(slice_tuple)
+                else:
+                    operand = operand[slice_tuple]
 
-                condition_obj = compare_fn(server_operand, threshold)
-                if not hasattr(condition_obj, "where"):
-                    raise AttributeError("Condition object has no where() method")
+            operand_for_counts = operand
+            condition_obj = compare_fn(operand, threshold)
+            if not hasattr(condition_obj, "where"):
+                raise AttributeError("Condition object has no where() method")
 
-                v_true_server = server_operand if value_if_true is None else value_if_true
-                result_obj = condition_obj.where(v_true_server, v_false)
-
-                condition = np.asarray(_materialize_to_numpy(condition_obj), dtype=bool)
-                result_data = np.asarray(_materialize_to_numpy(result_obj))
+            v_true = operand if value_if_true is None else value_if_true
+            result_obj = condition_obj.where(v_true, v_false)
+            result_data = _materialize_backend_value(result_obj)
+            if resolved.is_server():
                 execution_mode = "server_where"
+        except Exception as e:
+            logger.warning(
+                f"Native where unavailable for '{path}' ({type(e).__name__}: {e}); "
+                "falling back to backend-normalized execution."
+            )
+            data_slice = resolved[slice_tuple]
+            if not isinstance(data_slice, blosc2.NDArray) and hasattr(data_slice, "shape"):
+                try:
+                    data_slice = blosc2.asarray(data_slice)
+                except Exception:
+                    pass
+            operand_for_counts = data_slice
+            condition_data = compare_fn(data_slice, threshold)
+            v_true = data_slice if value_if_true is None else value_if_true
+            if hasattr(condition_data, "where"):
+                result_data = _materialize_backend_value(condition_data.where(v_true, v_false))
+                execution_mode = (
+                    "blosc2_where_fallback"
+                    if isinstance(data_slice, blosc2.NDArray)
+                    else "backend_where_fallback"
+                )
+            else:
+                import numpy as np
+                result_data = np.where(condition_data, v_true, v_false)
+                if hasattr(result_data, "shape"):
+                    try:
+                        result_data = blosc2.asarray(result_data)
+                        execution_mode = "blosc2_from_numpy_fallback"
+                    except Exception:
+                        execution_mode = "numpy_where_fallback"
+                else:
+                    execution_mode = "numpy_where_fallback"
+
+        if save_path_clean is not None:
+            try:
+                client = _get_client()
+                if client is None:
+                    raise RuntimeError("Caterva2 client is not available.")
+
+                # For native server where + compute=False, keep lazy upload path.
+                if execution_mode == "server_where" and result_obj is not None and not compute:
+                    payload_to_upload = result_obj
+                    if (
+                        hasattr(payload_to_upload, "compute")
+                        and not isinstance(payload_to_upload, blosc2.NDArray)
+                    ):
+                        persisted = client.upload(payload_to_upload, save_path_clean, compute=False)
+                    else:
+                        persisted = client.upload(payload_to_upload, save_path_clean)
+                else:
+                    payload_to_upload = result_data
+                    if (
+                        hasattr(payload_to_upload, "compute")
+                        and not isinstance(payload_to_upload, blosc2.NDArray)
+                    ):
+                        payload_to_upload = payload_to_upload.compute()
+                    if (
+                        not isinstance(payload_to_upload, blosc2.NDArray)
+                        and hasattr(payload_to_upload, "shape")
+                    ):
+                        try:
+                            payload_to_upload = blosc2.asarray(payload_to_upload)
+                        except Exception:
+                            # Keep backend-provided representation if conversion fails.
+                            pass
+                    persisted = client.upload(payload_to_upload, save_path_clean)
+
+                persisted_result_path = (
+                    getattr(persisted, "path", None)
+                    or getattr(persisted, "name", None)
+                    or save_path_clean
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to persist where_filter result to '%s': %s",
+                    save_path_clean,
+                    e,
+                )
+                return {
+                    "error": f"Failed to persist filtered result to '{save_path_clean}': {e}",
+                    "path": path,
+                    "save_path": save_path_clean,
+                }
+        
+        result_dtype = str(getattr(result_data, "dtype", resolved.dtype))
+        result_shape = list(getattr(result_data, "shape", ()))
+        summary_source = result_data
+
+        if execution_mode == "server_where" and persisted_result_path is not None and compute:
+            try:
+                persisted_resolved = resolve_data(str(persisted_result_path))
+                summary_source = persisted_resolved.data
+                result_dtype = str(persisted_resolved.dtype)
+                result_shape = list(persisted_resolved.shape)
             except Exception as e:
                 logger.warning(
-                    f"Server-side where unavailable for '{path}' ({type(e).__name__}: {e}); "
-                    "falling back to local NumPy."
+                    "Failed to compute where_filter summary from persisted dataset '%s': %s",
+                    persisted_result_path,
+                    e,
                 )
-                data_slice = resolved[slice_tuple]
-                condition = compare_fn(data_slice, threshold)
-                v_true_local = data_slice if value_if_true is None else value_if_true
-                result_data = np.where(condition, v_true_local, v_false)
-        else:
-            data_slice = resolved[slice_tuple]
-            condition = compare_fn(data_slice, threshold)
-            v_true_local = data_slice if value_if_true is None else value_if_true
-            result_data = np.where(condition, v_true_local, v_false)
-        
+
         # Compute summary statistics
-        summary = _compute_summary(result_data)
+        summary = _compute_summary(summary_source)
         
-        # Count how many elements matched the condition
-        num_matched = int(np.sum(condition))
-        num_total = int(condition.size)
+        # Count how many elements matched the condition.
+        # Avoid materializing boolean lazy conditions directly: this can segfault
+        # for some backend combinations (e.g. server slices + lazy bool eval).
+        num_total = int(estimated_size)
+        num_matched = 0
+        try:
+            if operand_for_counts is None:
+                raise RuntimeError("No operand available for counting.")
+            if hasattr(operand_for_counts, "shape") and hasattr(operand_for_counts, "__getitem__"):
+                full_key = tuple(slice(None) for _ in getattr(operand_for_counts, "shape", ()))
+                operand_values = operand_for_counts[full_key]
+            else:
+                operand_values = operand_for_counts
+            condition_values = compare_fn(operand_values, threshold)
+            num_total = int(getattr(condition_values, "size", estimated_size))
+            if hasattr(condition_values, "sum"):
+                num_matched = int(_to_json_safe(condition_values.sum()))
+            else:
+                try:
+                    condition_values_b2 = blosc2.asarray(condition_values)
+                    num_matched = int(_to_json_safe(condition_values_b2.sum()))
+                except Exception:
+                    import numpy as np
+                    num_matched = int(np.sum(condition_values))
+        except Exception as e:
+            logger.warning(
+                "Condition-count fallback for '%s' due to backend error: %s",
+                path,
+                e,
+            )
+            num_total = int(getattr(result_data, "size", estimated_size))
+            if (
+                value_if_true is not None
+                and value_if_false is not None
+                and value_if_true != value_if_false
+            ):
+                try:
+                    if hasattr(result_data, "shape") and hasattr(result_data, "__getitem__"):
+                        result_values = result_data[tuple(slice(None) for _ in getattr(result_data, "shape", ()))]
+                    else:
+                        result_values = result_data
+                    comparison_values = result_values == value_if_true
+                    if hasattr(comparison_values, "sum"):
+                        num_matched = int(_to_json_safe(comparison_values.sum()))
+                    else:
+                        try:
+                            comparison_b2 = blosc2.asarray(comparison_values)
+                            num_matched = int(_to_json_safe(comparison_b2.sum()))
+                        except Exception:
+                            import numpy as np
+                            num_matched = int(np.sum(comparison_values))
+                except Exception:
+                    num_matched = 0
         match_percentage = (num_matched / num_total * 100) if num_total > 0 else 0
         
         result = {
             "path": path,
             "source": source_type,
             "dataset_shape": list(shape),
-            "dtype": str(resolved.dtype),
+            "dtype": result_dtype,
             "condition": f"data {operator} {threshold}",
             "slice_applied": slice_str_used,
-            "result_shape": list(result_data.shape),
+            "result_shape": result_shape,
             "estimated_elements": int(estimated_size),
             "value_if_true": "original_data" if value_if_true is None else value_if_true,
             "value_if_false": v_false,
@@ -674,14 +1023,67 @@ def where_filter(
             "materialized_in_notebook": False
         }
 
+        if save_path_clean is not None:
+            if persisted_result_path is not None:
+                result["stored_server_side"] = True
+                result["result_path"] = str(persisted_result_path)
+                result["save_path"] = str(save_path_clean)
+                result["compute_on_save"] = bool(compute)
+                result["server_change_applied"] = True
+                result["auto_saved_to_personal"] = bool(auto_save_requested)
+                result["_next_step_hint"] = (
+                    "Use result_path in follow-up server operations "
+                    "(get_slice, collapse_dimensions, where_filter, visualize_dataset)."
+                )
+            else:
+                result["stored_server_side"] = False
+                result["auto_saved_to_personal"] = False
+                if persistence_skipped_reason:
+                    result["persistence_note"] = persistence_skipped_reason
+        elif resolved.is_server():
+            result["stored_server_side"] = False
+            result["auto_saved_to_personal"] = False
+            result["persistence_note"] = (
+                "Not auto-saved to @personal because this session is not authenticated. "
+                "Use notebook login(...) to enable default persistence."
+            )
+
         if estimated_nbytes is not None:
             result["estimated_size_mb"] = round(estimated_nbytes / (1024 * 1024), 2)
 
         if warning:
             result["warning"] = warning
 
+        # Auto-inject local results into notebook namespace (no size limit for local).
+        # User already has the dataset locally; we assume they can handle the size.
+        injected_var_name: str | None = None
+        if is_local:
+            try:
+                namespace = get_notebook_namespace()
+                if namespace is not None:
+                    # Generate a unique variable name for the filtered result
+                    base_name = path.replace("_", "").replace("-", "").replace(".", "_")
+                    base_name = f"filtered_{base_name}"
+                    counter = 1
+                    var_name = base_name
+                    while var_name in namespace:
+                        var_name = f"{base_name}_{counter}"
+                        counter += 1
+                    
+                    # Inject into notebook namespace
+                    namespace[var_name] = result_data
+                    injected_var_name = var_name
+                    register_fetched_object(var_name, result_data)
+                    logger.info(f"Auto-injected local where_filter result as '{var_name}'")
+            except Exception as e:
+                logger.debug(f"Could not auto-inject local where_filter result: {e}")
+
         if summary["num_elements"] <= LLM_INLINE_DATA_MAX_ELEMENTS:
             result["data"] = _to_json_safe(result_data)
+        
+        # Add injected variable name if applicable
+        if injected_var_name is not None:
+            result["injected_as_variable"] = injected_var_name
         
         # Hint for LLM on how to present results
         if summary["num_elements"] > LLM_INLINE_DATA_MAX_ELEMENTS:
@@ -716,7 +1118,7 @@ def load_dataset(path: str) -> Dict[str, Any]:
     Load an entire dataset into the notebook for manipulation.
     
     This is the explicit "I want all of this data" tool. It loads the complete
-    dataset (after decompression if from Caterva2) into memory as a numpy array.
+    dataset into notebook memory as a backend array object (Blosc2-first).
     
     Safety: This is explicit materialization. Enforces strict size checks including
     an explicit 100MB cap for notebook loading.
@@ -734,10 +1136,8 @@ def load_dataset(path: str) -> Dict[str, Any]:
     logger.info(f"Loading full {source_type}: '{path}'")
     
     try:
-        import numpy as np
-
         resolved = resolve_data(path)
-        total_elements = int(np.prod(resolved.shape))
+        total_elements = _shape_product(resolved.shape)
         estimated_nbytes = _estimate_nbytes(total_elements, resolved.dtype)
 
         if total_elements > LOAD_DATASET_MAX_ELEMENTS:
@@ -770,13 +1170,27 @@ def load_dataset(path: str) -> Dict[str, Any]:
                 )
             }
 
-        # Materialize explicitly
-        data = resolved[:] if not resolved.is_local() else resolved.data
-        data = np.asarray(data)
+        # Materialize explicitly while keeping backend-native representation.
+        if resolved.is_local():
+            data = resolved.data
+        else:
+            # Keep the server dataset handle directly. Creating a full NDArray
+            # via .slice(..., as_blosc2=True) can crash in backend reductions
+            # (observed as kernel segfaults when computing summary stats).
+            data = resolved.data
 
         # Final guard using actual in-memory size
-        if data.nbytes > LOAD_DATASET_MAX_BYTES:
-            actual_mb = data.nbytes / (1024 * 1024)
+        data_nbytes = getattr(data, "nbytes", None)
+        if data_nbytes is None:
+            data_nbytes = _estimate_nbytes(int(getattr(data, "size", total_elements)), getattr(data, "dtype", resolved.dtype))
+        if data_nbytes is None:
+            return {
+                "error": "Could not estimate materialized size for loaded dataset.",
+                "shape": list(getattr(data, "shape", resolved.shape)),
+                "dtype": str(getattr(data, "dtype", resolved.dtype)),
+            }
+        if data_nbytes > LOAD_DATASET_MAX_BYTES:
+            actual_mb = data_nbytes / (1024 * 1024)
             return {
                 "error": (
                     f"Materialized array size is {actual_mb:.2f} MB, exceeding "
@@ -797,11 +1211,12 @@ def load_dataset(path: str) -> Dict[str, Any]:
             register_fetched_object(path, data)
             registered = True
 
-        size_bytes = int(data.nbytes)
+        size_bytes = int(data_nbytes)
         size_mb = round(size_bytes / (1024 * 1024), 2)
+        data_size = int(getattr(data, "size", total_elements))
 
         logger.debug(f"✓ Loaded: shape={list(data.shape)}, dtype={data.dtype}")
-        logger.debug(f"Size: {size_mb} MB ({data.size:,} elements)")
+        logger.debug(f"Size: {size_mb} MB ({data_size:,} elements)")
         if registered:
             logger.debug("📦 Available in notebook for manipulation")
         
@@ -816,17 +1231,23 @@ def load_dataset(path: str) -> Dict[str, Any]:
             "dtype": str(data.dtype),
             "size_bytes": size_bytes,
             "size_mb": size_mb,
-            "num_elements": data.size,
+            "num_elements": data_size,
+            "backend": "blosc2" if isinstance(data, blosc2.NDArray) else type(data).__name__,
             "summary": summary,
             "registered_in_notebook": registered
         }
         
         # Include full data only for very small payloads
-        if data.size <= LLM_INLINE_DATA_MAX_ELEMENTS:
-            result["data"] = _to_json_safe(data)
+        if data_size <= LLM_INLINE_DATA_MAX_ELEMENTS:
+            full_slice = tuple(slice(None) for _ in data.shape) if hasattr(data, "shape") else slice(None)
+            try:
+                inline_data = data[full_slice]
+            except Exception:
+                inline_data = data
+            result["data"] = _to_json_safe(inline_data)
         else:
             result["note"] = (
-                f"Data has {data.size:,} elements — returning summary only to protect LLM context. "
+                f"Data has {data_size:,} elements — returning summary only to protect LLM context. "
                 f"The dataset is materialized in notebook memory via load_dataset."
             )
         

@@ -99,3 +99,48 @@ def test_run_executes_tool_call_then_returns_final_answer(monkeypatch) -> None:
     output = test_agent.run("show roots")
     assert "Found one root: @public" in output
     assert any(m.get("role") == "tool" for m in test_agent.messages)
+
+
+def test_run_sanitizes_large_tool_binary_payload_for_llm(monkeypatch) -> None:
+    # What this tests: huge binary-like fields are redacted before entering LLM history.
+    # Why important: prevents token bloat and keeps model context focused.
+    test_agent = agent.Agent()
+
+    tool_call = types.SimpleNamespace(
+        id="tc-image",
+        function=types.SimpleNamespace(name="render_projection", arguments="{}"),
+        model_dump=lambda: {
+            "id": "tc-image",
+            "type": "function",
+            "function": {"name": "render_projection", "arguments": "{}"},
+        },
+    )
+
+    responses = [
+        _fake_response(content=None, tool_calls=[tool_call]),
+        _fake_response(content="Projection ready.", tool_calls=None),
+    ]
+    iterator = iter(responses)
+    monkeypatch.setattr(test_agent, "_call_llm_with_retry", lambda **_: next(iterator))
+
+    image_payload = "data:image/png;base64," + ("A" * 8000)
+    monkeypatch.setattr(
+        agent,
+        "execute_tool",
+        lambda _name, _args: json.dumps(
+            {"status": "success", "image": image_payload, "format": "png"}
+        ),
+    )
+
+    output = test_agent.run("render me a projection")
+    assert "Projection ready." in output
+
+    tool_messages = [m for m in test_agent.messages if m.get("role") == "tool"]
+    assert len(tool_messages) == 1
+    llm_payload = json.loads(tool_messages[0]["content"])
+    assert llm_payload["image"] == "[omitted from LLM context]"
+    assert llm_payload["image_available_in_notebook"] is True
+    assert "_llm_sanitization" in llm_payload
+
+    assert test_agent.last_tool_results[0]["name"] == "render_projection"
+    assert test_agent.last_tool_results[0]["content"]["image"] == image_payload

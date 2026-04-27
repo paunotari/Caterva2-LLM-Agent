@@ -10,12 +10,14 @@ Works with both:
 """
 
 import logging
+from datetime import datetime, timezone
 from typing import Dict, Any
-import numpy as np
+
+import blosc2
 
 logger = logging.getLogger('caterva2_agent')
 
-from ._base import resolve_data, _to_json_safe
+from ._base import resolve_data, _to_json_safe, register_fetched_object, _get_client, get_client_auth_status, get_notebook_namespace
 
 
 # ---------------------------------------------------------------------------
@@ -30,6 +32,14 @@ SUPPORTED_STATS = {"min", "max", "mean", "sum", "std", "var", "argmin", "argmax"
 
 # Supported reduction operations for collapse_dimensions
 SUPPORTED_REDUCTIONS = {"min", "max", "mean", "sum", "std", "var", "prod"}
+
+
+def _shape_product(shape: tuple[int, ...] | list[int]) -> int:
+    """Compute number of elements from a shape tuple/list."""
+    total = 1
+    for dim in shape:
+        total *= int(dim)
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +106,8 @@ ANALYSIS_TOOLS = [
                 "- 3D tomography → 2D projection via max/mean/sum (medical imaging, microscopy) "
                 "- 4D climate data → 3D spatial map via time-averaging "
                 "- Point cloud density maps via spatial binning "
-                "The result is registered in the notebook for visualization or further analysis. "
+                "Behavior: For server datasets, stores result in @personal (if authenticated). "
+                "For local variables, auto-injects result into notebook namespace for chaining. "
                 "Works with both server datasets (@path) and local variables (variable_name)."
             ),
             "parameters": {
@@ -137,9 +148,18 @@ ANALYSIS_TOOLS = [
                     "variable_name": {
                         "type": "string",
                         "description": (
-                            "Optional name for storing the result in the notebook namespace. "
-                            "If not provided, auto-generates from path and operation (e.g. 'ds_3d_max_axis2'). "
+                            "Optional name for storing the result. Behavior depends on source: "
+                            "- Server datasets: Used as the base name for @personal storage path "
+                            "- Local variables: Used as the notebook variable name (auto-generated if omitted, e.g. 'collapsed_varname_max_axis2'). "
                             "Use descriptive names like 'tomo_mip' or 'time_averaged_temp'."
+                        )
+                    },
+                    "persist_result": {
+                        "type": "boolean",
+                        "description": (
+                            "For server datasets: whether to save result to @personal (default: True if authenticated). "
+                            "For local variables: ignored (always injected into notebook namespace). "
+                            "Allows skipping server persistence if only needing temporary visualization."
                         )
                     }
                 },
@@ -204,24 +224,18 @@ def get_dataset_stats(
             "stats": {}
         }
 
-        # Compute each requested statistic
-        # For local numpy arrays, we need to use numpy functions
-        # For server datasets, we use the dataset methods
+        # Compute each requested statistic via backend-native array methods.
         for stat_name in stats_list:
-            if resolved.is_local():
-                # Use numpy functions for local arrays
-                if stat_name == "argmin":
-                    raw_value = np.argmin(data, axis=axis)
-                elif stat_name == "argmax":
-                    raw_value = np.argmax(data, axis=axis)
-                else:
-                    func = getattr(np, stat_name)
-                    raw_value = func(data, axis=axis)
-            else:
-                # Use dataset methods for server data
+            try:
                 method = getattr(data, stat_name)
                 raw_value = method(axis=axis)
-            
+            except AttributeError as e:
+                return {
+                    "error": (
+                        f"Statistic '{stat_name}' is not available on backend "
+                        f"'{resolved.backend}' for '{path}': {e}"
+                    )
+                }
             result["stats"][stat_name] = _to_json_safe(raw_value)
 
         return result
@@ -239,7 +253,8 @@ def collapse_dimensions(
     path: str,
     axis: int,
     operation: str,
-    variable_name: str | None = None
+    variable_name: str | None = None,
+    persist_result: bool = True
 ) -> Dict[str, Any]:
     """
     Collapse a multidimensional dataset along one axis using aggregation.
@@ -253,8 +268,9 @@ def collapse_dimensions(
     - 4D climate data (time, lat, lon, alt) → 3D spatial average
     - Density maps via summing along spatial dimensions
     
-    The result is automatically registered in the notebook namespace for
-    visualization or further manipulation.
+    Behavior:
+    - Server datasets: persist to @personal (when authenticated and persist_result=True)
+    - Local variables: auto-inject into notebook namespace for chaining
     
     Args:
         path: Server dataset path (e.g. '@public/examples/ds-3d.b2nd')
@@ -264,8 +280,9 @@ def collapse_dimensions(
               axis=1 → result shape (100, 300)
               axis=2 → result shape (100, 200)
         operation: Aggregation to apply: max, mean, sum, min, std, var, prod
-        variable_name: Optional custom name for notebook storage. If None,
-                      auto-generates like 'ds_3d_max_axis2'
+        variable_name: Optional custom name for storage handle.
+                      For server datasets, used as logical result label.
+                      For local variables, used as notebook variable name.
     
     Returns:
         Dict with result metadata and storage info, or 'error' on failure.
@@ -282,8 +299,6 @@ def collapse_dimensions(
     logger.debug(f"Operation: {operation} along axis={axis}")
     
     try:
-        from ._base import register_fetched_object
-        
         resolved = resolve_data(path)
         data = resolved.data
         shape = resolved.shape
@@ -302,7 +317,7 @@ def collapse_dimensions(
         # Calculate expected output size
         expected_shape = list(shape)
         expected_shape.pop(axis)
-        expected_size = np.prod(expected_shape) if expected_shape else 1
+        expected_size = _shape_product(expected_shape) if expected_shape else 1
         
         # CRITICAL: Check if operation is feasible
         # For massive datasets, even the OUTPUT might be too large
@@ -333,24 +348,60 @@ def collapse_dimensions(
                 "note": "For truly massive datasets, consider pre-computed projections or tiled processing."
             }
         
-        # Execute the reduction
-        # For server datasets, this executes server-side on Blosc2
-        # For local arrays, uses numpy
-        if resolved.is_local():
-            # Local numpy array
-            reduction_func = getattr(np, operation)
-            result_array = reduction_func(data, axis=axis)
-        else:
-            # Server dataset - use native Caterva2 methods
-            method = getattr(data, operation)
-            result_array = method(axis=axis)
-        
-        # Convert to numpy for consistency (if not already)
-        result_array = np.asarray(result_array)
-        result_shape = result_array.shape
-        result_size = result_array.size
+        # Execute the reduction using backend-native methods.
+        method = getattr(data, operation)
+        result_data = method(axis=axis)
+
+        result_shape = tuple(getattr(result_data, "shape", ()))
+        result_size = int(getattr(result_data, "size", 1))
+        result_dtype = str(getattr(result_data, "dtype", type(result_data).__name__))
         
         logger.debug(f"Result shape: {result_shape}, size: {result_size:,} elements")
+        
+        # Determine source type and storage behavior
+        is_local = not path.startswith('@')
+        persisted_result_path: str | None = None
+        persistence_note: str | None = None
+        injected_var_name: str | None = None
+        
+        # For server datasets: attempt to persist to @personal if authenticated
+        if resolved.is_server() and persist_result:
+            auth_status = get_client_auth_status()
+            if auth_status.get("authenticated"):
+                try:
+                    client = _get_client()
+                    if client is not None:
+                        # Build unique save path with timestamp: @personal/collapsed/{base}_{op}_axis{axis}_{TIMESTAMP}.b2nd
+                        source_name = path.split('/')[-1] if '/' in path else path
+                        stem = source_name.removesuffix('.b2nd').removesuffix('.b2frame')
+                        sanitized = ''.join(
+                            ch if ch.isalnum() or ch in ('-', '_') else '_'
+                            for ch in stem
+                        ) or 'collapsed'
+                        
+                        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+                        save_name = f"{sanitized}_{operation}_axis{axis}_{timestamp}"
+                        save_path = f"@personal/collapsed/{save_name}.b2nd"
+                        
+                        # Ensure result is blosc2 for upload
+                        payload = result_data
+                        if not isinstance(payload, blosc2.NDArray) and hasattr(payload, "shape"):
+                            try:
+                                payload = blosc2.asarray(payload)
+                            except Exception as e:
+                                logger.debug(f"Could not convert to blosc2 for upload: {e}")
+                        
+                        persisted = client.upload(payload, save_path)
+                        persisted_result_path = getattr(persisted, "path", None)
+                        logger.info(f"✓ Server result persisted to: {persisted_result_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to persist collapse_dimensions result to @personal: {e}")
+                    persistence_note = f"Could not save to @personal: {e}"
+            else:
+                persistence_note = (
+                    "Not auto-saved to @personal because this session is not authenticated. "
+                    "Use notebook login(...) to enable default persistence."
+                )
         
         # Auto-generate variable name if not provided
         if variable_name is None:
@@ -359,20 +410,47 @@ def collapse_dimensions(
                 # '@public/dir/ds-3d.b2nd' → 'ds_3d'
                 base_name = path.split('/')[-1].replace('.b2nd', '').replace('.b2frame', '')
                 base_name = base_name.replace('-', '_')
+                # Server datasets: use clean name (no prefix) — result goes to @personal
+                variable_name = f"{base_name}_{operation}_axis{axis}"
             else:
                 # 'my_data' → 'my_data'
                 base_name = path.replace('-', '_')
-            
-            variable_name = f"{base_name}_{operation}_axis{axis}"
+                # Local variables: use prefix to distinguish from source data
+                variable_name = f"collapsed_{base_name}_{operation}_axis{axis}"
         
         # Sanitize variable name (remove special characters)
         variable_name = variable_name.replace('@', '').replace('/', '_').replace('.', '_')
         
-        # Register in notebook namespace
-        register_fetched_object(variable_name, result_array)
+        # For local variables: always auto-inject into notebook namespace
+        if is_local:
+            try:
+                namespace = get_notebook_namespace()
+                if namespace is not None:
+                    # Generate unique variable name to avoid collisions
+                    base_name_for_collision = variable_name
+                    counter = 1
+                    var_name = base_name_for_collision
+                    while var_name in namespace:
+                        var_name = f"{base_name_for_collision}_{counter}"
+                        counter += 1
+                    
+                    # Inject into notebook namespace
+                    namespace[var_name] = result_data
+                    injected_var_name = var_name
+                    register_fetched_object(var_name, result_data)
+                    logger.info(f"✓ Auto-injected local collapse_dimensions result as '{var_name}'")
+                    variable_name = var_name
+            except Exception as e:
+                logger.debug(f"Could not auto-inject local collapse_dimensions result: {e}")
         
         logger.debug(f"✓ Stored as: '{variable_name}'")
         
+        data_min = None
+        data_max = None
+        if hasattr(result_data, "min") and hasattr(result_data, "max"):
+            data_min = _to_json_safe(result_data.min())
+            data_max = _to_json_safe(result_data.max())
+
         # Build response
         result = {
             "status": "success",
@@ -383,21 +461,54 @@ def collapse_dimensions(
             "result_shape": list(result_shape),
             "result_size": int(result_size),
             "variable_name": variable_name,
-            "dtype": str(result_array.dtype),
+            "dtype": result_dtype,
             "data_range": {
-                "min": _to_json_safe(np.min(result_array)),
-                "max": _to_json_safe(np.max(result_array))
+                "min": data_min,
+                "max": data_max,
             },
-            "note": (
-                f"Result stored as '{variable_name}' in notebook. "
-                f"Reduced {ndim}D → {len(result_shape)}D via {operation} along axis {axis}. "
-                "Ready for immediate visualization."
-            )
+            "materialized_in_notebook": is_local
         }
+        
+        # Add server persistence info if applicable
+        if resolved.is_server():
+            if persisted_result_path is not None:
+                result["stored_server_side"] = True
+                result["result_path"] = str(persisted_result_path)
+                result["server_change_applied"] = True
+                result["_next_step_hint"] = (
+                    "Use result_path in follow-up server operations "
+                    "(get_slice, collapse_dimensions, where_filter, visualize_dataset)."
+                )
+            else:
+                result["stored_server_side"] = False
+                if persistence_note:
+                    result["persistence_note"] = persistence_note
+        
+        # Build note message
+        if is_local:
+            note = (
+                f"Result auto-injected as '{variable_name}' in notebook. "
+                f"Reduced {ndim}D → {len(result_shape)}D via {operation} along axis {axis}. "
+                "Ready for immediate visualization or further analysis."
+            )
+        else:
+            if persisted_result_path:
+                note = (
+                    f"Result persisted to {persisted_result_path}. "
+                    f"Reduced {ndim}D → {len(result_shape)}D via {operation} along axis {axis}. "
+                    "Ready for immediate visualization or further analysis."
+                )
+            else:
+                note = (
+                    f"Result computed ({ndim}D → {len(result_shape)}D via {operation} along axis {axis}). "
+                    "Not persisted because server auth/persistence is unavailable for this call."
+                )
+        
+        result["note"] = note
         
         # Include a sample of the data if it's small enough
         if result_size <= 100:
-            result["preview"] = _to_json_safe(result_array)
+            result["preview"] = _to_json_safe(result_data)
         
         return result
     
