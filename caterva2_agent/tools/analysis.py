@@ -161,6 +161,15 @@ ANALYSIS_TOOLS = [
                             "For local variables: ignored (always injected into notebook namespace). "
                             "Allows skipping server persistence if only needing temporary visualization."
                         )
+                    },
+                    "compute": {
+                        "type": "boolean",
+                        "description": (
+                            "Controls result materialization (default: false). "
+                            "False (default): returns lazy expression for efficient chaining. "
+                            "True: materializes and computes result (for visualization/caching). "
+                            "Only applies to server datasets when persist_result=true."
+                        )
                     }
                 },
                 "required": ["path", "axis", "operation"]
@@ -254,7 +263,8 @@ def collapse_dimensions(
     axis: int,
     operation: str,
     variable_name: str | None = None,
-    persist_result: bool = True
+    persist_result: bool = True,
+    compute: bool = False,
 ) -> Dict[str, Any]:
     """
     Collapse a multidimensional dataset along one axis using aggregation.
@@ -271,6 +281,8 @@ def collapse_dimensions(
     Behavior:
     - Server datasets: persist to @personal (when authenticated and persist_result=True)
     - Local variables: auto-inject into notebook namespace for chaining
+    - With compute=False (default): stores lazy expressions for chaining
+    - With compute=True: materializes result for visualization/caching
     
     Args:
         path: Server dataset path (e.g. '@public/examples/ds-3d.b2nd')
@@ -283,6 +295,10 @@ def collapse_dimensions(
         variable_name: Optional custom name for storage handle.
                       For server datasets, used as logical result label.
                       For local variables, used as notebook variable name.
+        persist_result: For server datasets, whether to save result to @personal (default: True if authenticated).
+        compute: Controls result materialization (default: False for lazy).
+                False (default): returns lazy expression for efficient chaining.
+                True: materializes and computes result (for visualization/caching).
     
     Returns:
         Dict with result metadata and storage info, or 'error' on failure.
@@ -383,15 +399,26 @@ def collapse_dimensions(
                         save_name = f"{sanitized}_{operation}_axis{axis}_{timestamp}"
                         save_path = f"@personal/collapsed/{save_name}.b2nd"
                         
-                        # Ensure result is blosc2 for upload
-                        payload = result_data
-                        if not isinstance(payload, blosc2.NDArray) and hasattr(payload, "shape"):
-                            try:
-                                payload = blosc2.asarray(payload)
-                            except Exception as e:
-                                logger.debug(f"Could not convert to blosc2 for upload: {e}")
+                        # Handle compute parameter for lazy evaluation
+                        if compute is False and isinstance(result_data, blosc2.LazyArray):
+                            # Keep lazy for chaining without materialization
+                            persisted = client.upload(result_data, save_path, compute=False)
+                        else:
+                            # Materialize if compute=True or if not lazy
+                            payload = result_data
+                            if (
+                                hasattr(payload, "compute")
+                                and not isinstance(payload, blosc2.NDArray)
+                            ):
+                                payload = payload.compute()
+                            if not isinstance(payload, blosc2.NDArray) and hasattr(payload, "shape"):
+                                try:
+                                    payload = blosc2.asarray(payload)
+                                except Exception as e:
+                                    logger.debug(f"Could not convert to blosc2 for upload: {e}")
+                            
+                            persisted = client.upload(payload, save_path)
                         
-                        persisted = client.upload(payload, save_path)
                         persisted_result_path = getattr(persisted, "path", None)
                         logger.info(f"✓ Server result persisted to: {persisted_result_path}")
                 except Exception as e:

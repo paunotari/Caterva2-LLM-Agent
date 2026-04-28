@@ -325,12 +325,16 @@ def _infer_backend(data: Any, source: str) -> str:
 
 def _normalize_local_array(value: Any, variable_name: str) -> tuple[Any, str | None]:
     """
-    Normalize local inputs to blosc2.NDArray for Blosc2-first internal execution.
+    Normalize local inputs while preserving lazy arrays for efficient chaining.
+
+    Lazy arrays (blosc2.LazyArray) are kept as-is to enable composition
+    without materialization. Only non-lazy inputs are converted to blosc2.
 
     Returns:
         (normalized_value, normalized_from_type_name_or_none)
     """
-    if isinstance(value, blosc2.NDArray):
+    # Keep NDArray and LazyArray as-is (both are blosc2-native)
+    if isinstance(value, (blosc2.NDArray, blosc2.LazyArray)):
         return value, None
 
     source_type = type(value).__name__

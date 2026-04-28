@@ -108,6 +108,15 @@ DATA_ACCESS_TOOLS = [
                             "Must start with '@personal/'. If omitted, auto-generates a path under "
                             "'@personal/slices/'."
                         )
+                    },
+                    "compute": {
+                        "type": "boolean",
+                        "description": (
+                            "Controls result materialization (default: false). "
+                            "False (default): returns lazy expression for efficient chaining. "
+                            "True: materializes and computes result (for visualization/caching). "
+                            "Only applies to server datasets when persist_result=true."
+                        )
                     }
                 },
                 "required": ["path"]
@@ -184,9 +193,10 @@ DATA_ACCESS_TOOLS = [
                     "compute": {
                         "type": "boolean",
                         "description": (
-                            "Only used for server datasets when authenticated. "
-                            "True (default): compute and materialize result on server during auto-save. "
-                            "False: store lazy expression wrapper."
+                            "Controls result materialization (default: false). "
+                            "False (default): returns lazy expression for efficient chaining. "
+                            "True: materializes and computes result on server (for caching/reuse). "
+                            "Only applies to server datasets when authenticated."
                         )
                     }
                 },
@@ -469,6 +479,7 @@ def get_slice(
     slices: str | None = None,
     persist_result: bool = True,
     save_path: str | None = None,
+    compute: bool = False,
 ) -> Dict[str, Any]:
     """
     Retrieve a slice of data from a dataset or local variable.
@@ -487,6 +498,10 @@ def get_slice(
         persist_result: For authenticated server paths, store slice result in
             @personal for follow-up operations (default: True).
         save_path: Optional explicit @personal destination for persistence.
+        compute: Controls result materialization (default: False for lazy).
+            False (default): returns lazy expression for efficient chaining.
+            True: materializes and computes result (for visualization/caching).
+            Only applies to server datasets when persist_result=true.
     
     Returns:
         Dict with slice metadata, summary, and data values, or 'error' on failure.
@@ -573,19 +588,35 @@ def get_slice(
 
                 try:
                     payload_to_upload = data
-                    if (
-                        not isinstance(payload_to_upload, blosc2.NDArray)
-                        and hasattr(payload_to_upload, "shape")
-                    ):
-                        try:
-                            payload_to_upload = blosc2.asarray(payload_to_upload)
-                        except Exception:
-                            pass
-
-                    client = _get_client()
-                    if client is None:
-                        raise RuntimeError("Caterva2 client is not available.")
-                    persisted = client.upload(payload_to_upload, target_path)
+                    
+                    # Handle compute parameter for lazy evaluation
+                    if compute is False and isinstance(payload_to_upload, blosc2.LazyArray):
+                        # Keep lazy for chaining without materialization
+                        client = _get_client()
+                        if client is None:
+                            raise RuntimeError("Caterva2 client is not available.")
+                        persisted = client.upload(payload_to_upload, target_path, compute=False)
+                    else:
+                        # Materialize if compute=True or if not lazy
+                        if (
+                            hasattr(payload_to_upload, "compute")
+                            and not isinstance(payload_to_upload, blosc2.NDArray)
+                        ):
+                            payload_to_upload = payload_to_upload.compute()
+                        if (
+                            not isinstance(payload_to_upload, blosc2.NDArray)
+                            and hasattr(payload_to_upload, "shape")
+                        ):
+                            try:
+                                payload_to_upload = blosc2.asarray(payload_to_upload)
+                            except Exception:
+                                pass
+                        
+                        client = _get_client()
+                        if client is None:
+                            raise RuntimeError("Caterva2 client is not available.")
+                        persisted = client.upload(payload_to_upload, target_path)
+                    
                     persisted_result_path = (
                         getattr(persisted, "path", None)
                         or getattr(persisted, "name", None)
@@ -718,7 +749,7 @@ def where_filter(
     value_if_true: float | None = None,
     value_if_false: float | None = None,
     slices: str | None = None,
-    compute: bool = True,
+    compute: bool = False,
 ) -> Dict[str, Any]:
     """
     Filter dataset or local variable values based on a condition.
@@ -728,13 +759,15 @@ def where_filter(
     - value_if_false where the condition is not met
     
     Execution strategy:
-    - Prefer backend-native where execution for both server and local data.
-    - Fallback to generic array backend only when native where is unavailable.
+    - By default, returns lazy expressions (compute=False) to enable chaining without materialization
+    - Prefer backend-native where execution for both server and local data
+    - Fallback to generic array backend only when native where is unavailable
     
     Use cases:
     - Thresholding: elevation > 3000 → show peaks, mask valleys
     - Masking: set out-of-range values to NaN or 0
     - Binary classification: value > threshold → 1, else 0
+    - Lazy composition: chain multiple filters without materializing intermediates
     
     Args:
         path: Server dataset path (e.g. '@public/examples/ds-1d.b2nd')
@@ -744,12 +777,13 @@ def where_filter(
         value_if_true: Value where condition is True (default: original data)
         value_if_false: Value where condition is False (default: 0)
         slices: Optional slice to limit the region (recommended for large datasets)
-        compute: For server datasets with authenticated sessions, controls auto-save mode.
-                 True (default): compute and materialize result during upload.
-                 False: keep lazy expression wrapper.
+        compute: Controls result materialization (default: False for lazy evaluation).
+                 False (default): returns lazy expression for efficient chaining
+                 True: materializes and computes result on server (for caching/reuse)
     
     Returns:
         Dict with filtered data, condition info, and summary, or 'error' on failure.
+        For lazy results, the returned path can be chained in subsequent where_filter calls.
     """
     # Validate operator
     if operator not in COMPARISON_OPERATORS:

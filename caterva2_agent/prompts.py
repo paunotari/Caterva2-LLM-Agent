@@ -30,11 +30,14 @@ AVAILABLE TOOLS BY CATEGORY:
 - get_dataset_stats: Compute min, max, mean, std, var, etc. for a dataset
 - collapse_dimensions: Reduce N-D to (N-1)-D via server-side aggregation (max/mean/sum/min/std/var/prod)
   Use this for GIANT datasets (multi-GB) — executes on compressed data without downloading
+  Note: By default returns lazy expressions for efficient chaining; use compute=true to materialize
 
 **Data Access** — retrieve actual values:
 - get_slice: Get a portion of dataset values (large requests return metadata/summary by default)
+  Note: By default returns lazy expressions for efficient chaining; use compute=true to materialize
 - where_filter: Conditionally select values (like SQL WHERE), summary-first for large outputs;
   for authenticated server sessions, result is auto-saved to @personal for chaining
+  Note: By default returns lazy expressions for efficient chaining; use compute=true to materialize
 - load_dataset: Explicitly materialize a dataset in notebook memory as a blosc2-backed object (strict size checks apply)
 
 **Dataset Management** — copy/move/remove/download server datasets/files:
@@ -49,6 +52,15 @@ AVAILABLE TOOLS BY CATEGORY:
 - render_projection: Generate static 2D PNG projections from higher-dimensional data (good for giant datasets)
 
 WORKFLOW: Always browse first to find datasets, then analyze or access data as needed.
+
+LAZY EVALUATION (for efficient chaining):
+By default, operations like get_slice, where_filter, and collapse_dimensions return lazy expressions
+(blosc2.LazyArray) to enable chaining multiple operations without materialization. This means:
+- Operations compose efficiently: filter → filter → collapse → stats without intermediate data transfer
+- Stats (min, max, mean, etc.) work on lazy expressions without full materialization
+- For visualization, lazy expressions are automatically materialized only when needed
+- Power users can override with compute=true to force materialization if desired (e.g., for caching results)
+This is typically transparent to the user and happens automatically in the background.
 
 NOTEBOOK INTEGRATION:
 You are running inside a Jupyter notebook. Data is injected into the user's Python namespace
