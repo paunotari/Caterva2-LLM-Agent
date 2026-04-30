@@ -652,11 +652,54 @@ def render_projection(
             return collapse_result
         
         # Get the collapsed 2D data
-        from ._base import get_fetched_objects
-        fetched = get_fetched_objects()
-        var_name = collapse_result["variable_name"]
-        data_2d = fetched[var_name]
+        # For server datasets, collapse_dimensions persists to @personal and returns result_path
+        # For local variables, it registers to fetched_objects and returns variable_name
+        from ._base import get_fetched_objects, resolve_data
         
+        if collapse_result.get("stored_server_side"):
+            # Server dataset: fetch from persisted result_path.
+            # We must materialize with slicing; passing the Dataset handle
+            # directly to scipy can fail with rank-related errors.
+            result_path = collapse_result.get("result_path")
+            if not result_path:
+                return {
+                    "error": "Server dataset collapsed but result_path not provided",
+                    "debug": collapse_result
+                }
+            resolved = resolve_data(result_path)
+            data_2d = resolved[:]
+            logger.debug(f"Fetched server collapse result from {result_path}")
+        else:
+            # Local variable: retrieve from notebook namespace
+            fetched = get_fetched_objects()
+            var_name = collapse_result["variable_name"]
+            if var_name not in fetched:
+                return {
+                    "error": f"Variable '{var_name}' not found in notebook namespace",
+                    "available_vars": list(fetched.keys())
+                }
+            data_2d = fetched[var_name]
+        
+        if not hasattr(data_2d, "shape"):
+            return {
+                "error": f"Collapsed result is not array-like (type: {type(data_2d).__name__})",
+                "debug": collapse_result,
+            }
+
+        result_ndim = len(data_2d.shape)
+        if result_ndim != 2:
+            return {
+                "error": (
+                    f"render_projection requires a 2D collapsed result, "
+                    f"but got {result_ndim}D with shape {list(data_2d.shape)}"
+                ),
+                "result_shape": list(data_2d.shape),
+                "suggestion": (
+                    "Use an axis/operation that yields 2D output. "
+                    "For 3D data, collapse one axis. For 4D+, collapse until 2D."
+                ),
+            }
+
         logger.debug(f"Collapsed to 2D: {data_2d.shape}")
         
         # Step 2: Downsample if needed for reasonable image size
