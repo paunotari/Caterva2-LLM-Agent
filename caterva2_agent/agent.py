@@ -21,33 +21,20 @@ from typing import Any
 from caterva2_agent.config import client, MODEL_NAME, SYSTEM_PROMPT
 from caterva2_agent.tools import TOOLS, execute_tool
 
-# Robust log path: project root if possible, else CWD (works in scripts and Jupyter)
-try:
-    PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    LOGS_DIR = os.path.join(PROJECT_ROOT, 'logs')
-    os.makedirs(LOGS_DIR, exist_ok=True)  # Create logs/ if it doesn't exist
-    LOG_PATH = os.path.join(LOGS_DIR, 'agent.log')
-except NameError:
-    # Fallback for interactive environments (Jupyter, REPL)
-    LOGS_DIR = os.path.join(os.getcwd(), 'logs')
-    os.makedirs(LOGS_DIR, exist_ok=True)
-    LOG_PATH = os.path.join(LOGS_DIR, 'agent.log')
-LOG_FORMATTER = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+# Setup logging: project root logs/ directory
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOGS_DIR = os.path.join(PROJECT_ROOT, 'logs')
+os.makedirs(LOGS_DIR, exist_ok=True)
+LOG_PATH = os.path.join(LOGS_DIR, 'agent.log')
 
-# Use a named logger for our code only — avoids capturing httpx/groq DEBUG noise
 logger = logging.getLogger('caterva2_agent')
 logger.setLevel(logging.DEBUG)
-
-# Keep file logging (agent.log) without duplicating handlers across notebook re-runs.
-if not any(
-    isinstance(h, RotatingFileHandler) and getattr(h, "baseFilename", None) == os.path.abspath(LOG_PATH)
-    for h in logger.handlers
-):
-    file_handler = RotatingFileHandler(LOG_PATH, maxBytes=1_000_000, backupCount=5)
-    file_handler.setFormatter(LOG_FORMATTER)
-    logger.addHandler(file_handler)
-
 logger.propagate = False
+
+# File handler with rotation (1 MB per file, keep 5 backups)
+file_handler = RotatingFileHandler(LOG_PATH, maxBytes=1_000_000, backupCount=5)
+file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+logger.addHandler(file_handler)
 
 MAX_TOOL_RESULT_TEXT_CHARS = 4000
 SENSITIVE_TOOL_FIELD_NAMES = {"image", "image_base64", "binary_blob"}
