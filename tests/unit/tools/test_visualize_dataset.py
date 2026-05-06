@@ -76,7 +76,7 @@ class TestPlotHelpers:
     
     def test_plot_1d_returns_figure(self):
         """_plot_1d should return a Plotly Figure."""
-        from caterva2_agent.tools.visualization import _plot_1d
+        from caterva2_agent.tools.visualization import _plot_1d, DEFAULT_INTERACTIVE_HEIGHT
         import plotly.graph_objects as go
         
         data = np.array([1, 2, 3, 4, 5])
@@ -84,10 +84,11 @@ class TestPlotHelpers:
         
         assert isinstance(fig, go.Figure)
         assert len(fig.data) == 1  # One trace
+        assert fig.layout.height == DEFAULT_INTERACTIVE_HEIGHT
     
     def test_plot_2d_returns_figure(self):
         """_plot_2d should return a Plotly Figure."""
-        from caterva2_agent.tools.visualization import _plot_2d
+        from caterva2_agent.tools.visualization import _plot_2d, DEFAULT_INTERACTIVE_HEIGHT
         import plotly.graph_objects as go
         
         data = np.array([[1, 2], [3, 4]])
@@ -95,10 +96,14 @@ class TestPlotHelpers:
         
         assert isinstance(fig, go.Figure)
         assert len(fig.data) == 1  # One heatmap trace
+        assert fig.layout.height == DEFAULT_INTERACTIVE_HEIGHT
     
     def test_plot_3d_volume_returns_figure(self):
         """_plot_3d_volume should return a Plotly Figure."""
-        from caterva2_agent.tools.visualization import _plot_3d_volume
+        from caterva2_agent.tools.visualization import (
+            _plot_3d_volume,
+            DEFAULT_INTERACTIVE_HEIGHT,
+        )
         import plotly.graph_objects as go
         
         data = np.random.rand(5, 5, 5)
@@ -106,6 +111,7 @@ class TestPlotHelpers:
         
         assert isinstance(fig, go.Figure)
         assert len(fig.data) == 1  # One volume trace
+        assert fig.layout.height == DEFAULT_INTERACTIVE_HEIGHT
 
 
 class TestStructuredArrays:

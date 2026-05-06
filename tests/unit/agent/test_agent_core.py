@@ -51,11 +51,21 @@ _ensure_local_import_bootstrap()
 from caterva2_agent import agent
 
 
-def _fake_response(content: str | None, tool_calls: list | None, total_tokens: int = 10):
+def _fake_response(
+    content: str | None,
+    tool_calls: list | None,
+    total_tokens: int = 10,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+):
     """Build a minimal Groq/OpenAI-like response object for unit tests."""
     message = types.SimpleNamespace(content=content, tool_calls=tool_calls)
     choice = types.SimpleNamespace(message=message)
-    usage = types.SimpleNamespace(total_tokens=total_tokens)
+    usage = types.SimpleNamespace(
+        total_tokens=total_tokens,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
     return types.SimpleNamespace(choices=[choice], usage=usage)
 
 
@@ -70,7 +80,34 @@ def test_run_returns_final_answer_when_no_tool_calls(monkeypatch) -> None:
     )
 
     output = test_agent.run("hello")
+    assert "Session Token Usage" in output
+    assert "Input:" in output
+    assert "Output:" in output
+    assert "---" in output
     assert "Direct answer" in output
+
+
+def test_run_tracks_prompt_and_completion_tokens(monkeypatch) -> None:
+    # What this tests: session counters split input/output usage and include them in replies.
+    # Why important: users need accurate per-direction token accounting for API cost tracking.
+    test_agent = agent.Agent()
+    monkeypatch.setattr(
+        test_agent,
+        "_call_llm_with_retry",
+        lambda **_: _fake_response(
+            "Usage-aware answer",
+            tool_calls=None,
+            total_tokens=19,
+            prompt_tokens=12,
+            completion_tokens=7,
+        ),
+    )
+
+    output = test_agent.run("hello")
+    assert "Session Token Usage" in output
+    assert "Input:  12" in output
+    assert "Output: 7" in output
+    assert "---" in output
 
 
 def test_run_executes_tool_call_then_returns_final_answer(monkeypatch) -> None:

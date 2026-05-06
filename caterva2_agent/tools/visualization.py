@@ -50,6 +50,10 @@ DEFAULT_COLORSCALE = "Viridis"
 # Default opacity for 3D volume rendering (lower = more transparent)
 DEFAULT_OPACITY = 0.3
 
+# Default notebook height for interactive Plotly figures.
+# A taller default avoids the common "too wide, too short" rendering in notebook cells.
+DEFAULT_INTERACTIVE_HEIGHT = 650
+
 # Maximum pixels for static image rendering (2000×2000 = 4M pixels)
 # Keeps PNG file size reasonable while providing good detail
 MAX_STATIC_IMAGE_PIXELS = 2000
@@ -254,7 +258,8 @@ def _plot_1d(data: np.ndarray, title: str, path: str) -> go.Figure:
         title=title,
         xaxis_title="Index",
         yaxis_title="Value",
-        template="plotly_white"
+        template="plotly_white",
+        height=DEFAULT_INTERACTIVE_HEIGHT
     )
     return fig
 
@@ -282,6 +287,7 @@ def _plot_2d(data: np.ndarray, title: str, colorscale: str) -> go.Figure:
         xaxis_title="Column",
         yaxis_title="Row",
         template="plotly_white",
+        height=DEFAULT_INTERACTIVE_HEIGHT,
         yaxis=dict(scaleanchor="x", scaleratio=1)  # Equal aspect ratio
     )
     return fig
@@ -346,7 +352,8 @@ def _plot_3d_volume(
             zaxis_title="Z",
             aspectmode='data'  # Preserve aspect ratio
         ),
-        template="plotly_white"
+        template="plotly_white",
+        height=DEFAULT_INTERACTIVE_HEIGHT
     )
     
     return fig

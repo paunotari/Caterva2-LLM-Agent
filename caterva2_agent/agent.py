@@ -195,13 +195,26 @@ class Agent:
         ]
         # Safety guardrails
         self.max_iterations = 10     # Prevent infinite tool-call loops
+        self.prompt_tokens_used = 0
+        self.completion_tokens_used = 0
         self.total_tokens_used = 0
-        self.max_total_tokens = 50000  # Cost safety limit per conversation
+        self.max_total_tokens = 2_000_000  # Cost safety limit per conversation
         # Context window management: keep only the last N messages plus system prompt
         # This is a simple heuristic; more sophisticated approaches if needed (e.g., summarization, etc.).
         self.max_history_messages = 20  # Tune as needed
         # Raw tool outputs from the latest run; used by notebook integration for rich artifacts.
         self.last_tool_results: list[dict[str, Any]] = []
+
+    def _token_usage_header(self) -> str:
+        """Build a professional Markdown token usage summary for reply display."""
+        return (
+            "```\n"
+            "Session Token Usage\n"
+            f"├─ Input:  {self.prompt_tokens_used:,}\n"
+            f"└─ Output: {self.completion_tokens_used:,}\n"
+            "```\n\n"
+            "---"
+        )
 
     @staticmethod
     def _call_llm_with_retry(**kwargs) -> Any | None:
@@ -244,6 +257,7 @@ class Agent:
         # Enforce token budget before starting
         if self.total_tokens_used > self.max_total_tokens:
             return (
+                f"{self._token_usage_header()}\n\n"
                 f"[Token limit reached: {self.total_tokens_used} tokens used. "
                 f"Please type 'reset' to start a new conversation.]"
             )
@@ -273,9 +287,30 @@ class Agent:
 
             # Track token usage for cost and safety monitoring
             if hasattr(response, "usage"):
-                tokens_this_call = response.usage.total_tokens
-                self.total_tokens_used += tokens_this_call
-                logger.info(f"Iteration {iteration}: {tokens_this_call} tokens | {self.total_tokens_used} total")
+                usage = response.usage
+                prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+                completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+                total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+
+                self.prompt_tokens_used += prompt_tokens
+                self.completion_tokens_used += completion_tokens
+
+                if prompt_tokens or completion_tokens:
+                    tokens_this_call = prompt_tokens + completion_tokens
+                    self.total_tokens_used = self.prompt_tokens_used + self.completion_tokens_used
+                else:
+                    # Fallback for providers/mocks that expose only total_tokens.
+                    tokens_this_call = total_tokens
+                    self.prompt_tokens_used += total_tokens
+                    self.total_tokens_used += total_tokens
+
+                logger.info(
+                    "Iteration %s tokens | input=%s output=%s total=%s",
+                    iteration,
+                    prompt_tokens,
+                    completion_tokens,
+                    self.total_tokens_used,
+                )
 
             assistant_message = response.choices[0].message
 
@@ -293,7 +328,8 @@ class Agent:
                     "content": assistant_message.content
                 })
                 logger.info("----- Agent Execution Complete -----\n")
-                return "\n" + assistant_message.content or "[No response from LLM]"
+                final_answer = assistant_message.content or "[No response from LLM]"
+                return f"{self._token_usage_header()}\n\n{final_answer}"
 
             # --- Tool calls: execute in parallel ---
             # All tool calls within a single LLM response are independent by design —
@@ -338,11 +374,16 @@ class Agent:
             # Loop back: LLM will see the tool results and decide the next step
 
         logger.info("----- Agent Execution Complete (max iterations reached) -----\n")
-        return "[Max iterations reached. Please try rephrasing your question.]"
+        return (
+            f"{self._token_usage_header()}\n\n"
+            "[Max iterations reached. Please try rephrasing your question.]"
+        )
 
     def reset(self):
         """Clear conversation history (keeping only the system prompt) and reset token counter."""
         self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.prompt_tokens_used = 0
+        self.completion_tokens_used = 0
         self.total_tokens_used = 0
         self.last_tool_results = []
         logger.info("Conversation and token counter reset")
