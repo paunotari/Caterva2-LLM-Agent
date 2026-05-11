@@ -14,9 +14,10 @@ import logging
 import os
 import random
 import time
+import types
 from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import RotatingFileHandler
-from typing import Any
+from typing import Any, Callable
 
 from caterva2_agent.config import client, MODEL_NAME, SYSTEM_PROMPT
 from caterva2_agent.tools import TOOLS, execute_tool
@@ -228,7 +229,129 @@ class Agent:
         recent = self.messages[1:][-self.max_history_messages:]
         return [system] + recent
 
-    def run(self, user_input: str) -> str:
+    def _apply_usage(self, usage: Any, iteration: int) -> None:
+        """Accumulate token usage from a response usage object."""
+        if usage is None:
+            return
+
+        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+
+        self.prompt_tokens_used += prompt_tokens
+        self.completion_tokens_used += completion_tokens
+
+        if prompt_tokens or completion_tokens:
+            self.total_tokens_used = self.prompt_tokens_used + self.completion_tokens_used
+        else:
+            # Fallback for providers/mocks that expose only total_tokens.
+            self.prompt_tokens_used += total_tokens
+            self.total_tokens_used += total_tokens
+
+        logger.info(
+            "Iteration %s tokens | input=%s output=%s total=%s",
+            iteration,
+            prompt_tokens,
+            completion_tokens,
+            self.total_tokens_used,
+        )
+
+    def _call_llm_streaming(
+        self,
+        *,
+        trimmed_history: list[dict[str, Any]],
+        on_text_chunk: Callable[[str], None] | None = None,
+    ) -> tuple[Any, list[Any], str]:
+        """
+        Consume a streamed LLM response and rebuild final text/tool call objects.
+
+        Returns:
+            (usage_obj_or_none, reconstructed_tool_calls, reconstructed_content)
+        """
+        stream = self._call_llm_with_retry(
+            model=MODEL_NAME,
+            messages=trimmed_history,
+            tools=TOOLS,
+            tool_choice="auto",
+            temperature=0.2,
+            max_tokens=1024,
+            stream=True,
+        )
+
+        usage_obj: Any | None = None
+        tool_calls_acc: dict[int, dict[str, Any]] = {}
+        saw_tool_calls = False
+        content_parts: list[str] = []
+
+        for chunk in stream:
+            if hasattr(chunk, "usage") and getattr(chunk, "usage") is not None:
+                usage_obj = getattr(chunk, "usage")
+
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+
+            delta = getattr(choices[0], "delta", None)
+            if delta is None:
+                continue
+
+            delta_tool_calls = getattr(delta, "tool_calls", None) or []
+            if delta_tool_calls:
+                saw_tool_calls = True
+                for tc in delta_tool_calls:
+                    index = int(getattr(tc, "index", 0) or 0)
+                    entry = tool_calls_acc.setdefault(
+                        index,
+                        {
+                            "id": None,
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        },
+                    )
+                    tc_id = getattr(tc, "id", None)
+                    if tc_id:
+                        entry["id"] = tc_id
+                    fn = getattr(tc, "function", None)
+                    if fn is not None:
+                        fn_name = getattr(fn, "name", None)
+                        if fn_name:
+                            entry["function"]["name"] = fn_name
+                        fn_args = getattr(fn, "arguments", None)
+                        if fn_args:
+                            entry["function"]["arguments"] += fn_args
+
+            delta_content = getattr(delta, "content", None)
+            if delta_content:
+                text_piece = delta_content if isinstance(delta_content, str) else str(delta_content)
+                content_parts.append(text_piece)
+                if not saw_tool_calls and on_text_chunk is not None:
+                    on_text_chunk(text_piece)
+
+        reconstructed_tool_calls: list[Any] = []
+        for idx in sorted(tool_calls_acc):
+            payload = tool_calls_acc[idx]
+            if payload["id"] is None:
+                payload["id"] = f"stream-tool-{idx}"
+            reconstructed_tool_calls.append(
+                types.SimpleNamespace(
+                    id=payload["id"],
+                    function=types.SimpleNamespace(
+                        name=payload["function"]["name"],
+                        arguments=payload["function"]["arguments"],
+                    ),
+                    model_dump=lambda payload=payload: payload,
+                )
+            )
+
+        return usage_obj, reconstructed_tool_calls, "".join(content_parts)
+
+    def run(
+        self,
+        user_input: str,
+        *,
+        stream_final_answer: bool = False,
+        on_final_text_chunk: Callable[[str], None] | None = None,
+    ) -> str:
         """
         Process a user message and return the agent's final response.
 
@@ -263,44 +386,29 @@ class Agent:
             # Call the LLM with the current conversation and tool definitions
             # [PROVIDER: GroqCloud] — tool schema format and response structure follows OpenAI's function calling spec
             trimmed_history = self._get_trimmed_history()
-            # Resilience & Retry Logic
-            response = self._call_llm_with_retry(
-                model=MODEL_NAME,
-                messages=trimmed_history,
-                tools=TOOLS,
-                tool_choice="auto",
-                temperature=0.2,
-                max_tokens=1024
-            )
-
-            # Track token usage for cost and safety monitoring
-            if hasattr(response, "usage"):
-                usage = response.usage
-                prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-                completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-                total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
-
-                self.prompt_tokens_used += prompt_tokens
-                self.completion_tokens_used += completion_tokens
-
-                if prompt_tokens or completion_tokens:
-                    tokens_this_call = prompt_tokens + completion_tokens
-                    self.total_tokens_used = self.prompt_tokens_used + self.completion_tokens_used
-                else:
-                    # Fallback for providers/mocks that expose only total_tokens.
-                    tokens_this_call = total_tokens
-                    self.prompt_tokens_used += total_tokens
-                    self.total_tokens_used += total_tokens
-
-                logger.info(
-                    "Iteration %s tokens | input=%s output=%s total=%s",
-                    iteration,
-                    prompt_tokens,
-                    completion_tokens,
-                    self.total_tokens_used,
+            if stream_final_answer and on_final_text_chunk is not None:
+                usage, streamed_tool_calls, streamed_content = self._call_llm_streaming(
+                    trimmed_history=trimmed_history,
+                    on_text_chunk=on_final_text_chunk,
                 )
-
-            assistant_message = response.choices[0].message
+                self._apply_usage(usage, iteration)
+                assistant_message = types.SimpleNamespace(
+                    content=streamed_content or None,
+                    tool_calls=streamed_tool_calls or None,
+                )
+            else:
+                # Resilience & Retry Logic
+                response = self._call_llm_with_retry(
+                    model=MODEL_NAME,
+                    messages=trimmed_history,
+                    tools=TOOLS,
+                    tool_choice="auto",
+                    temperature=0.2,
+                    max_tokens=1024
+                )
+                if hasattr(response, "usage"):
+                    self._apply_usage(getattr(response, "usage"), iteration)
+                assistant_message = response.choices[0].message
 
             # Log tool names only — raw Pydantic repr is unreadable
             if assistant_message.tool_calls:

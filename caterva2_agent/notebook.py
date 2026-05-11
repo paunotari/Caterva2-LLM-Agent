@@ -384,7 +384,28 @@ def ask(message: str) -> None:
     agent = _get_agent()
     
     try:
-        response = agent.run(processed_message)
+        stream_handle = None
+        streamed_text = ""
+
+        def _on_final_text_chunk(chunk: str) -> None:
+            nonlocal stream_handle, streamed_text
+            if not chunk:
+                return
+            streamed_text += chunk
+            try:
+                if stream_handle is None:
+                    stream_handle = display(Markdown(streamed_text), display_id=True)
+                else:
+                    stream_handle.update(Markdown(streamed_text))
+            except Exception:
+                # Streaming is best-effort; fallback to final response rendering.
+                pass
+
+        response = agent.run(
+            processed_message,
+            stream_final_answer=True,
+            on_final_text_chunk=_on_final_text_chunk,
+        )
         
         # Inject any fetched data into the notebook namespace
         fetched = pop_fetched_objects()
@@ -402,7 +423,7 @@ def ask(message: str) -> None:
             )
         
         # Display response with Markdown formatting in Jupyter
-        _display_response(response)
+        _display_response(response, stream_handle=stream_handle)
         
     except Exception as e:
         error_msg = f"[Error: {type(e).__name__}: {e}]"
@@ -580,7 +601,7 @@ def auth_status() -> None:
 # DISPLAY HELPERS (for richer notebook output)
 # ---------------------------------------------------------------------------
 
-def _display_response(response: str) -> None:
+def _display_response(response: str, stream_handle: Any | None = None) -> None:
     """
     Display an agent response with Markdown rendering.
     
@@ -591,6 +612,9 @@ def _display_response(response: str) -> None:
     # placeholders in notebook cells.
     response = re.sub(r"!\[[^\]]*]\([^)]+\)", "", response).strip()
     try:
+        if stream_handle is not None and hasattr(stream_handle, "update"):
+            stream_handle.update(Markdown(response))
+            return
         display(Markdown(response))
     except (RuntimeError, ValueError, AttributeError):
         # display() is unavailable or failed (not in Jupyter, or rendering error)

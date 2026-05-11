@@ -69,6 +69,17 @@ def _fake_response(
     return types.SimpleNamespace(choices=[choice], usage=usage)
 
 
+def _fake_stream_chunk(
+    *,
+    content: str | None = None,
+    tool_calls: list | None = None,
+    usage=None,
+):
+    delta = types.SimpleNamespace(content=content, tool_calls=tool_calls)
+    choice = types.SimpleNamespace(delta=delta)
+    return types.SimpleNamespace(choices=[choice], usage=usage)
+
+
 def test_run_returns_final_answer_when_no_tool_calls(monkeypatch) -> None:
     # What this tests: the agent exits immediately when the model returns a direct final answer.
     # Why important: not every user request needs tools; forcing tool use would break normal chat behavior.
@@ -181,3 +192,75 @@ def test_run_sanitizes_large_tool_binary_payload_for_llm(monkeypatch) -> None:
 
     assert test_agent.last_tool_results[0]["name"] == "render_projection"
     assert test_agent.last_tool_results[0]["content"]["image"] == image_payload
+
+
+def test_run_streams_final_answer_chunks(monkeypatch) -> None:
+    # What this tests: stream mode emits final text chunks while preserving final answer.
+    # Why important: notebook UX should show token-like progress without changing loop semantics.
+    test_agent = agent.Agent()
+    usage = types.SimpleNamespace(prompt_tokens=5, completion_tokens=3, total_tokens=8)
+
+    stream_chunks = [
+        _fake_stream_chunk(content="Hello "),
+        _fake_stream_chunk(content="world", usage=usage),
+    ]
+    monkeypatch.setattr(test_agent, "_call_llm_with_retry", lambda **_: iter(stream_chunks))
+
+    captured: list[str] = []
+    output = test_agent.run(
+        "hi",
+        stream_final_answer=True,
+        on_final_text_chunk=captured.append,
+    )
+
+    assert "".join(captured) == "Hello world"
+    assert "Hello world" in output
+    assert "Input:  5" in output
+    assert "Output: 3" in output
+
+
+def test_run_stream_mode_handles_tool_calls(monkeypatch) -> None:
+    # What this tests: stream mode reconstructs tool calls and continues the ReAct loop.
+    # Why important: tool turns and final-turn streaming must coexist in one run.
+    test_agent = agent.Agent()
+
+    first_stream = [
+        _fake_stream_chunk(
+            tool_calls=[
+                types.SimpleNamespace(
+                    index=0,
+                    id="tc-stream",
+                    function=types.SimpleNamespace(name="list_roots", arguments='{"pa'),
+                )
+            ]
+        ),
+        _fake_stream_chunk(
+            tool_calls=[
+                types.SimpleNamespace(
+                    index=0,
+                    id=None,
+                    function=types.SimpleNamespace(name=None, arguments='th": "@public"}'),
+                )
+            ],
+            usage=types.SimpleNamespace(prompt_tokens=7, completion_tokens=2, total_tokens=9),
+        ),
+    ]
+    second_stream = [
+        _fake_stream_chunk(content="Done.", usage=types.SimpleNamespace(prompt_tokens=3, completion_tokens=1, total_tokens=4))
+    ]
+    streams = iter([iter(first_stream), iter(second_stream)])
+    monkeypatch.setattr(test_agent, "_call_llm_with_retry", lambda **_: next(streams))
+    monkeypatch.setattr(agent, "execute_tool", lambda name, args: json.dumps({"name": name, "args": args}))
+
+    output = test_agent.run(
+        "stream tools",
+        stream_final_answer=True,
+        on_final_text_chunk=lambda _chunk: None,
+    )
+
+    assert "Done." in output
+    tool_messages = [m for m in test_agent.messages if m.get("role") == "tool"]
+    assert len(tool_messages) == 1
+    payload = json.loads(tool_messages[0]["content"])
+    assert payload["name"] == "list_roots"
+    assert payload["args"] == {"path": "@public"}
