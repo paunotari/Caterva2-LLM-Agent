@@ -230,16 +230,30 @@ def _describe_variable(name: str, value: Any) -> str:
     if hasattr(value, 'dtype'):
         parts.append(f"dtype={value.dtype}")
     if hasattr(value, '__len__'):
-        parts.append(f"len={len(value)}")
-    
+        try:
+            parts.append(f"len={len(value)}")
+        except Exception:
+            # Some lazy/backed containers may fail len() when backing data is unavailable.
+            pass
+
+    value_type = type(value)
+    value_type_name = value_type.__name__.lower()
+    value_module = value_type.__module__.lower()
+    is_lazy_like = "lazy" in value_type_name or "lazy" in value_module
+
     # Add sample statistics for numeric arrays
-    if hasattr(value, 'min') and hasattr(value, 'max') and hasattr(value, 'mean'):
+    if not is_lazy_like and hasattr(value, 'min') and hasattr(value, 'max') and hasattr(value, 'mean'):
         try:
             parts.append(f"min={float(value.min()):.4g}")
             parts.append(f"max={float(value.max()):.4g}")
             parts.append(f"mean={float(value.mean()):.4g}")
         except (TypeError, ValueError):
             pass  # Non-numeric array
+        except Exception:
+            # Avoid crashing ask() when reductions trigger backend fetch errors.
+            parts.append("stats=unavailable")
+    elif is_lazy_like:
+        parts.append("stats=deferred(lazy)")
     
     return ", ".join(parts)
 
@@ -382,6 +396,10 @@ def ask(message: str) -> None:
         # Notify user about injected variables
         if injected_names:
             print(f"📦 Data available as: {', '.join(f'`{n}`' for n in injected_names)}")
+            print(
+                "You can now use these injected variables in your own notebook code, "
+                "or ask the agent to keep working with them."
+            )
         
         # Display response with Markdown formatting in Jupyter
         _display_response(response)
@@ -568,6 +586,10 @@ def _display_response(response: str) -> None:
     
     Falls back to plain print if not in Jupyter.
     """
+    # Visualization tools already render outputs inline (fig.show()/IPython.display).
+    # Remove markdown image tags from the assistant text to avoid duplicate or broken
+    # placeholders in notebook cells.
+    response = re.sub(r"!\[[^\]]*]\([^)]+\)", "", response).strip()
     try:
         display(Markdown(response))
     except (RuntimeError, ValueError, AttributeError):

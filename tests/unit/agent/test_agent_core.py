@@ -175,7 +175,7 @@ def test_run_sanitizes_large_tool_binary_payload_for_llm(monkeypatch) -> None:
     tool_messages = [m for m in test_agent.messages if m.get("role") == "tool"]
     assert len(tool_messages) == 1
     llm_payload = json.loads(tool_messages[0]["content"])
-    assert llm_payload["image"] == "[omitted from LLM context]"
+    assert "image" not in llm_payload
     assert llm_payload["image_available_in_notebook"] is True
     assert "_llm_sanitization" in llm_payload
 

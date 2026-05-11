@@ -74,7 +74,8 @@ def _sanitize_tool_payload_for_llm(
                 )
                 if key == "image":
                     sanitized["image_available_in_notebook"] = True
-                sanitized[key] = "[omitted from LLM context]"
+                # Omit sensitive payload fields entirely so the LLM does not try to
+                # reference placeholder URLs (which can render as broken images).
                 continue
 
             sanitized[key] = _sanitize_tool_payload_for_llm(
