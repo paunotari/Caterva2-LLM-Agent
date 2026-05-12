@@ -197,12 +197,56 @@ Inside your project's folder:
 ## How to use
 
 
+This document lists all agent operations grouped by the 5 tool families in the project.
+
+## 1) Browsing tools
+
+| Tool | What it does | Parameters you can ask for | Simple example                                                        |
+|---|---|---|-----------------------------------------------------------------------|
+| `list_roots` | Lists top-level Caterva2 roots (collections). | *(none)* | `ask("List the available roots on the server")`                       |
+| `list_datasets` | Lists datasets/files inside a root or sub-path, with pagination. | `path` (required), `limit` (optional), `offset` (optional) | `ask("List datasets in @public/examples with limit 20")` |
+| `get_dataset_info` | Returns metadata for a server dataset or local variable (shape, dtype, chunks, etc.). | `path` (required) | `ask("Show metadata for @public/examples/ds-2d-fields.b2nd")`         |
+
+## 2) Analysis tools
+
+| Tool | What it does | Parameters you can ask for | Simple example                                                        |
+|---|---|---|-----------------------------------------------------------------------|
+| `get_dataset_stats` | Computes stats (min/max/mean/std/etc.) in one call. | `path` (required), `stats` (optional list), `axis` (optional) | `ask("Compute all the stats for @public/examples/ds-1d.b2nd")`        |
+| `collapse_dimensions` | Reduces dimensionality by aggregating along one axis (e.g., 3D -> 2D). | `path` (required), `axis` (required), `operation` (required), `variable_name` (optional), `persist_result` (optional) | `ask("Collapse @public/examples/volume.b2nd along axis 2 using max")` |
+
+## 3) Data access tools
+
+| Tool | What it does | Parameters you can ask for | Simple example                                                                                    |
+|---|---|---|---------------------------------------------------------------------------------------------------|
+| `get_slice` | Fetches values from a region of a dataset/local variable. | `path` (required), `slices` (optional), `persist_result` (optional, server), `save_path` (optional, server) | `ask("Slice @public/examples/ds-2d.b2nd in 0:10,0:10")`                                           |
+| `where_filter` | Applies a conditional mask/filter (`where`) to data. | `path` (required), `operator` (required), `threshold` (required), `value_if_true` (optional), `value_if_false` (optional), `slices` (optional), `compute` (optional) | `ask("Filter @public/examples/elevation.b2nd where values are > 3000 and set false values to 0")` |
+| `load_dataset` | Materializes full dataset into notebook memory (with safety checks). | `path` (required) | `ask("Load @public/examples/ds-1d.b2nd locally in the notebook")`                                 |
+
+## 4) Dataset management tools
+
+| Tool | What it does | Parameters you can ask for | Simple example                                                               |
+|---|---|---|------------------------------------------------------------------------------|
+| `copy_dataset` | Copies a server dataset/file from one path to another. | `path` (required), `destination` (required) | `ask("Copy @public/a.b2nd to @personal/a_copy.b2nd")`                        |
+| `download_dataset` | Returns a direct download URL for a server dataset/file. | `path` (required) | `ask("Give me the download URL for @public/examples/ds-1d.b2nd")`            |
+| `move_dataset` | Moves a server dataset/file (dry-run + confirm safety flow). | `path` (required), `destination` (required), `dry_run` (optional), `confirm` (optional) | `ask("Move @personal/old.b2nd to the @shared root")`                         |
+| `remove_dataset` | Deletes a server dataset/file (dry-run + confirm safety flow). | `path` (required), `dry_run` (optional), `confirm` (optional) | `ask("Delete @personal/tmp.b2nd")`                                           |
+| `upload_dataset` | Uploads local variable/array to server (`@personal/`). | `source` (required), `destination` (required), `overwrite` (optional) | `ask("Upload my local variable {my_array} to @personal root in the server")` |
+
+## 5) Visualization tools
+
+| Tool | What it does | Parameters you can ask for | Simple example                                                         |
+|---|---|---|------------------------------------------------------------------------|
+| `visualize_dataset` | Interactive Plotly visualization (1D line, 2D heatmap, 3D volume). | `path` (required), `slices` (optional), `colorscale` (optional), `opacity` (optional), `max_size` (optional), `title` (optional) | `ask("Visualize @public/examples/kevlar-tomo.b2nd with opacity 0.25")` |
+| `render_projection` | Static 2D PNG projection from higher-dimensional data. | `path` (required), `axis` (required), `operation` (required), `colormap` (optional), `title` (optional) | `ask("Render a max projection of my local {volume} along axis 0")`     |
+
+And remember that you can always ask the agent to remember you what functions/tools can it use, and how to ask it: parameters, options...
+
 
 ---
 
 ## LLM Provider Support
 
-Caterva2Agent is compatible with **Groq** (free tier available)
+Caterva2Agent is compatible with **Groq** (free tier available).
 
 ---
 
