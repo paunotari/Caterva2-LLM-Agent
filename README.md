@@ -199,7 +199,7 @@ Inside your project's folder:
 
 This document lists all agent operations grouped by the 5 tool families in the project.
 
-## 1) Browsing tools
+### 1) Browsing tools
 
 | Tool | What it does | Parameters you can ask for | Simple example                                                        |
 |---|---|---|-----------------------------------------------------------------------|
@@ -207,14 +207,14 @@ This document lists all agent operations grouped by the 5 tool families in the p
 | `list_datasets` | Lists datasets/files inside a root or sub-path, with pagination. | `path` (required), `limit` (optional), `offset` (optional) | `ask("List datasets in @public/examples with limit 20")` |
 | `get_dataset_info` | Returns metadata for a server dataset or local variable (shape, dtype, chunks, etc.). | `path` (required) | `ask("Show metadata for @public/examples/ds-2d-fields.b2nd")`         |
 
-## 2) Analysis tools
+### 2) Analysis tools
 
 | Tool | What it does | Parameters you can ask for | Simple example                                                        |
 |---|---|---|-----------------------------------------------------------------------|
 | `get_dataset_stats` | Computes stats (min/max/mean/std/etc.) in one call. | `path` (required), `stats` (optional list), `axis` (optional) | `ask("Compute all the stats for @public/examples/ds-1d.b2nd")`        |
 | `collapse_dimensions` | Reduces dimensionality by aggregating along one axis (e.g., 3D -> 2D). | `path` (required), `axis` (required), `operation` (required), `variable_name` (optional), `persist_result` (optional) | `ask("Collapse @public/examples/volume.b2nd along axis 2 using max")` |
 
-## 3) Data access tools
+### 3) Data access tools
 
 | Tool | What it does | Parameters you can ask for | Simple example                                                                                    |
 |---|---|---|---------------------------------------------------------------------------------------------------|
@@ -222,7 +222,7 @@ This document lists all agent operations grouped by the 5 tool families in the p
 | `where_filter` | Applies a conditional mask/filter (`where`) to data. | `path` (required), `operator` (required), `threshold` (required), `value_if_true` (optional), `value_if_false` (optional), `slices` (optional), `compute` (optional) | `ask("Filter @public/examples/elevation.b2nd where values are > 3000 and set false values to 0")` |
 | `load_dataset` | Materializes full dataset into notebook memory (with safety checks). | `path` (required) | `ask("Load @public/examples/ds-1d.b2nd locally in the notebook")`                                 |
 
-## 4) Dataset management tools
+### 4) Dataset management tools
 
 | Tool | What it does | Parameters you can ask for | Simple example                                                               |
 |---|---|---|------------------------------------------------------------------------------|
@@ -232,14 +232,30 @@ This document lists all agent operations grouped by the 5 tool families in the p
 | `remove_dataset` | Deletes a server dataset/file (dry-run + confirm safety flow). | `path` (required), `dry_run` (optional), `confirm` (optional) | `ask("Delete @personal/tmp.b2nd")`                                           |
 | `upload_dataset` | Uploads local variable/array to server (`@personal/`). | `source` (required), `destination` (required), `overwrite` (optional) | `ask("Upload my local variable {my_array} to @personal root in the server")` |
 
-## 5) Visualization tools
+### 5) Visualization tools
 
 | Tool | What it does | Parameters you can ask for | Simple example                                                         |
 |---|---|---|------------------------------------------------------------------------|
 | `visualize_dataset` | Interactive Plotly visualization (1D line, 2D heatmap, 3D volume). | `path` (required), `slices` (optional), `colorscale` (optional), `opacity` (optional), `max_size` (optional), `title` (optional) | `ask("Visualize @public/examples/kevlar-tomo.b2nd with opacity 0.25")` |
 | `render_projection` | Static 2D PNG projection from higher-dimensional data. | `path` (required), `axis` (required), `operation` (required), `colormap` (optional), `title` (optional) | `ask("Render a max projection of my local {volume} along axis 0")`     |
 
+
+### 6) Notebook user operations (manual API)
+
+These functions are executed directly in the notebook by the user (not selected as internal agent tools).
+
+| Function | What it does | Parameters you can pass | Simple manual example |
+|---|---|---|---|
+| `ask()` | Sends a natural-language request to the agent and shows the response. | `message` (required string) | `ask("Slice @public/examples/volume.b2nd in 0:10,0:10")` |
+| `reset()` | Resets agent conversation memory and token counters. | *(none)* | `reset()` |
+| `variables()` | Lists variables injected by the agent into notebook namespace. | *(none)* | `variables()` |
+| `clear_variables()` | Removes all agent-injected variables from notebook namespace. | *(none)* | `clear_variables()` |
+| `login()` | Authenticates Caterva2 session using hidden password prompt. | `username` (optional; prompts if omitted) | `login("my_username")` |
+| `logout()` | Clears authentication and switches back to anonymous mode. | *(none)* | `logout()` |
+| `auth_status()` | Shows current authentication state and server URL. | *(none)* | `auth_status()` |
+
 And remember that you can always ask the agent to remember you what functions/tools can it use, and how to ask it: parameters, options...
+
 
 
 ---
